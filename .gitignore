@@ -1,0 +1,7 @@
+# Artefacts de compilation devkitPro/libnx
+build/
+*.o
+*.elf
+*.nro
+*.nacp
+*.map
