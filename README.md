@@ -33,6 +33,8 @@
 
 ### 📥 Installation (just want to use it?)
 
+👉 **[Download the latest `ComicReader.nro` from the Releases page](https://github.com/ZiggyGoofy/ComicReaderSwitch/releases)** — no need to compile anything.
+
 1. Make sure your Switch is running a custom firmware (e.g. Atmosphère) with the Homebrew Menu set up. *This project doesn't help you set that part up — plenty of guides exist elsewhere for it.*
 2. Copy `ComicReader.nro` to `/switch/ComicReader/` on your SD card.
 3. Create a folder for your comics: `/switch/ComicReader/comics/` (subfolders allowed).
@@ -115,6 +117,8 @@ ComicReaderSwitch/
 | Partout | **+** | Quitter |
 
 ### 📥 Installation (juste pour l'utiliser)
+
+👉 **[Télécharge le dernier `ComicReader.nro` depuis la page Releases](https://github.com/ZiggyGoofy/ComicReaderSwitch/releases)** — pas besoin de compiler quoi que ce soit.
 
 1. Ta Switch doit déjà tourner sous custom firmware (ex : Atmosphère) avec le Homebrew Menu configuré. *Ce projet ne couvre pas cette étape — de nombreux guides existent déjà ailleurs pour ça.*
 2. Copie `ComicReader.nro` dans `/switch/ComicReader/` sur ta carte SD.
