@@ -201,7 +201,7 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
     SDL_Color done_color = { 120, 200, 120, 255 };
     SDL_Color prog_color = { 120, 170, 220, 255 };
 
-    draw_text(renderer, fb->base_path, GRID_OUTER_MARGIN, 24, gray);
+    draw_text(renderer, "Comic Reader", GRID_OUTER_MARGIN, 24, gray);
 
     if (fb->entry_count == 0) {
         draw_text(renderer, "Aucun fichier .cbz/.cbr ni dossier ici.", GRID_OUTER_MARGIN, 100, gray);
@@ -256,13 +256,7 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
             }
 
             char title_display[64];
-            char name_with_brackets[FB_MAX_NAME + 4];
-            if (e->is_dir) {
-                snprintf(name_with_brackets, sizeof(name_with_brackets), "[%s]", e->name);
-            } else {
-                snprintf(name_with_brackets, sizeof(name_with_brackets), "%s", e->name);
-            }
-            truncate_to_width(name_with_brackets, GRID_TILE_W, title_display, sizeof(title_display));
+            truncate_to_width(e->name, GRID_TILE_W, title_display, sizeof(title_display));
             draw_text(renderer, title_display, tile_x, tile_y + GRID_COVER_H + 10,
                        index == fb->selected ? accent : white);
 
@@ -324,7 +318,10 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
         int tex_w, tex_h;
         SDL_QueryTexture(tex, NULL, NULL, &tex_w, &tex_h);
 
-        float base_scale = SDL_min((float)SCREEN_W / tex_w, (float)SCREEN_H / tex_h);
+        // Mode "cover" : l'image remplit tout l'écran (collée aux bords), quitte
+        // à rogner le haut/bas ou les côtés selon son ratio d'aspect. On utilise
+        // le maximum des deux ratios au lieu du minimum (letterbox) pour ça.
+        float base_scale = SDL_max((float)SCREEN_W / tex_w, (float)SCREEN_H / tex_h);
         int draw_w = (int)(tex_w * base_scale * zoom);
         int draw_h = (int)(tex_h * base_scale * zoom);
 
@@ -361,6 +358,21 @@ static void save_current_progress(const ComicArchive *ar) {
     }
 }
 
+// Calcule le niveau de zoom minimum (relatif à la base "cover" = 1.0, qui
+// remplit tout l'écran) permettant de voir la page entière, quel que soit
+// son ratio d'aspect. En dessous de ce niveau, on afficherait un espace vide
+// inutile ; au-dessus, on recommence à rogner l'image.
+static float min_zoom_for_texture(SDL_Texture *tex) {
+    if (!tex) return ZOOM_MIN;
+    int tw, th;
+    SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
+    if (tw <= 0 || th <= 0) return ZOOM_MIN;
+
+    float cover_scale = SDL_max((float)SCREEN_W / tw, (float)SCREEN_H / th);
+    float fit_scale = SDL_min((float)SCREEN_W / tw, (float)SCREEN_H / th);
+    return fit_scale / cover_scale; // toujours <= 1.0
+}
+
 int main(int argc, char *argv[]) {
     consoleDebugInit(debugDevice_SVC);
 
@@ -383,7 +395,7 @@ int main(int argc, char *argv[]) {
         printf("IMG_Init n'a pas pu charger tous les décodeurs: %s\n", IMG_GetError());
     }
 
-    SDL_Window *window = SDL_CreateWindow("comic-reader",
+    SDL_Window *window = SDL_CreateWindow("Comic Reader",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
 
@@ -501,17 +513,20 @@ int main(int argc, char *argv[]) {
             if (abs(right_y) > STICK_DEADZONE) {
                 float normalized = -right_y / 32768.0f;
                 zoom += normalized * ZOOM_SPEED_PER_FRAME;
-                if (zoom < ZOOM_MIN) zoom = ZOOM_MIN;
+                float min_zoom = min_zoom_for_texture(page_tex);
+                if (zoom < min_zoom) zoom = min_zoom;
                 if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
             }
 
-            if (zoom > ZOOM_MIN) {
-                if (abs(left_x) > STICK_DEADZONE) {
-                    pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
-                }
-                if (abs(left_y) > STICK_DEADZONE) {
-                    pan_y += (left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
-                }
+            // Déplacement (pan) : stick gauche. Toujours actif, même au zoom
+            // minimum — en mode "cover" l'image dépasse déjà de l'écran sur un
+            // axe par défaut, donc le clamp dans render_reader gère les bornes
+            // réelles quel que soit le niveau de zoom.
+            if (abs(left_x) > STICK_DEADZONE) {
+                pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
+            }
+            if (abs(left_y) > STICK_DEADZONE) {
+                pan_y += (left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
             }
 
             if (r3 && !prev_r3) {

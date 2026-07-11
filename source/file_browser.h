@@ -14,6 +14,7 @@ typedef struct {
 
 typedef struct {
     char base_path[FB_MAX_PATH];   // dossier actuellement affiché
+    char root_path[FB_MAX_PATH];   // dossier racine, infranchissable vers le haut
     FBEntry entries[FB_MAX_ENTRIES];
     int entry_count;
     int selected;                  // index sélectionné dans entries[]

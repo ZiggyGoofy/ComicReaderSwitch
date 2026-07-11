@@ -65,6 +65,8 @@ bool fb_init(FileBrowser *fb, const char *start_path) {
     memset(fb, 0, sizeof(FileBrowser));
     strncpy(fb->base_path, start_path, FB_MAX_PATH - 1);
     fb->base_path[FB_MAX_PATH - 1] = '\0';
+    strncpy(fb->root_path, start_path, FB_MAX_PATH - 1);
+    fb->root_path[FB_MAX_PATH - 1] = '\0';
     return fb_scan(fb);
 }
 
@@ -95,9 +97,16 @@ bool fb_enter_selected(FileBrowser *fb) {
 }
 
 bool fb_go_parent(FileBrowser *fb) {
+    // On ne remonte jamais au-delà de la racine autorisée (le dossier "comics"),
+    // pour ne pas exposer les dossiers voisins internes à l'appli (progress/, thumbnails/)
+    // ni le reste de la carte SD.
+    if (strcmp(fb->base_path, fb->root_path) == 0) {
+        return false;
+    }
+
     char *last_slash = strrchr(fb->base_path, '/');
     if (!last_slash || last_slash == fb->base_path) {
-        return false; // déjà à la racine
+        return false; // déjà à la racine du système de fichiers
     }
     *last_slash = '\0';
     return fb_scan(fb);

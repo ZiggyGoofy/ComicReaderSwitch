@@ -38,6 +38,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
 TARGET		:=	$(notdir $(CURDIR))
+APP_TITLE       :=      Comic Reader
+APP_AUTHOR      :=      ZiggyGoofy
+APP_VERSION     :=      0.1.0
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data

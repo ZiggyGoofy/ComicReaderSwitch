@@ -15,6 +15,13 @@ typedef struct {
     ArPageEntry pages[AR_MAX_PAGES];
     int page_count;
     int current_page;
+
+    // Handle d'archive gardé ouvert entre deux appels à ar_extract_page, pour
+    // une lecture séquentielle rapide (cas le plus courant : tourner les pages
+    // dans l'ordre). Opaque ici (void*) pour ne pas exposer libarchive dans ce
+    // header ; voir archive.c pour le cast réel vers struct archive*.
+    void *_handle;
+    int _handle_pos; // index (0-based) du prochain entry lisible séquentiellement via ce handle
 } ComicArchive;
 
 // Ouvre l'archive (cbz ou cbr, détecté automatiquement par libarchive) et
