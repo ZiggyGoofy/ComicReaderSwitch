@@ -23,65 +23,68 @@
 #define PAN_SPEED_PER_FRAME 14.0f
 #define STICK_DEADZONE 8000
 
-// --- Disposition de la vue bibliothèque hybride ---
-#define OUTER_MARGIN 40
-#define HEADER_H 70
-#define FOOTER_H 40
+// --- Barre latérale façon Noboru ---
+#define SIDEBAR_W 260
 
-// Carte "mise en avant" : uniquement pour le tout premier élément du dossier.
-// C'est la SEULE miniature générée à l'ouverture d'un dossier — le reste de
-// la liste est du texte simple, pour ne jamais avoir de délai de chargement
-// proportionnel au nombre de fichiers.
-#define HERO_COVER_W 220
-#define HERO_COVER_H 310
-#define HERO_GAP 30
-
-#define LIST_ROW_H 46
+// --- Grille de couvertures dans la zone de contenu (à droite de la sidebar) ---
+#define CONTENT_MARGIN 32
+#define GRID_COLS 4
+#define GRID_GAP 20
+#define GRID_TOP 36
+#define GRID_FOOTER_H 40
+#define GRID_TILE_W ((SCREEN_W - SIDEBAR_W - 2 * CONTENT_MARGIN - (GRID_COLS - 1) * GRID_GAP) / GRID_COLS)
+#define GRID_COVER_H ((int)(GRID_TILE_W * 1.3f))
+#define GRID_TITLE_H 26
+#define GRID_ROW_H (GRID_COVER_H + 8 + GRID_TITLE_H + GRID_GAP)
 
 typedef enum {
     APP_STATE_BROWSER,
     APP_STATE_READER
 } AppState;
 
-static TTF_Font *g_font = NULL;
+static TTF_Font *g_font = NULL;       // police standard (listes, libellés)
+static TTF_Font *g_font_title = NULL; // police plus grande (titre de la sidebar)
 static PlFontData g_font_data;
 
-// Libellés de progression ("Lu" / "En cours (p. X/Y)"), un par entrée du browser.
 static char g_entry_labels[FB_MAX_ENTRIES][40];
+static SDL_Texture *g_thumb_textures[FB_MAX_ENTRIES];
+static bool g_thumb_attempted[FB_MAX_ENTRIES];
 
-// Une seule miniature en cache à la fois : celle de l'élément actuellement
-// sélectionné. Se recharge à chaque changement de sélection (le cache disque
-// du module thumbnail rend les rechargements rapides après la 1re génération).
-static SDL_Texture *g_hero_thumb = NULL;
-static int g_hero_thumb_index = -1; // index d'entrée représenté par g_hero_thumb (-1 = aucun)
-
-static bool load_system_font(int point_size) {
+static bool load_system_font(void) {
     Result rc = plGetSharedFontByType(&g_font_data, PlSharedFontType_Standard);
     if (R_FAILED(rc)) {
         printf("plGetSharedFontByType a échoué: 0x%x\n", rc);
         return false;
     }
 
-    SDL_RWops *rw = SDL_RWFromConstMem(g_font_data.address, (int)g_font_data.size);
-    if (!rw) return false;
+    SDL_RWops *rw1 = SDL_RWFromConstMem(g_font_data.address, (int)g_font_data.size);
+    if (rw1) g_font = TTF_OpenFontRW(rw1, 1, 22);
 
-    g_font = TTF_OpenFontRW(rw, 1, point_size);
+    SDL_RWops *rw2 = SDL_RWFromConstMem(g_font_data.address, (int)g_font_data.size);
+    if (rw2) g_font_title = TTF_OpenFontRW(rw2, 1, 34);
+
     return g_font != NULL;
 }
 
-static int text_width(const char *text) {
-    if (!g_font || !text || !text[0]) return 0;
+static int text_width_ex(TTF_Font *font, const char *text) {
+    if (!font || !text || !text[0]) return 0;
     int w = 0, h = 0;
-    if (TTF_SizeUTF8(g_font, text, &w, &h) != 0) return 0;
+    if (TTF_SizeUTF8(font, text, &w, &h) != 0) return 0;
     return w;
 }
 
-static void clear_hero_thumbnail(void) {
-    if (g_hero_thumb) {
-        SDL_DestroyTexture(g_hero_thumb);
-        g_hero_thumb = NULL;
+static int text_width(const char *text) {
+    return text_width_ex(g_font, text);
+}
+
+static void clear_thumbnail_cache(void) {
+    for (int i = 0; i < FB_MAX_ENTRIES; i++) {
+        if (g_thumb_textures[i]) {
+            SDL_DestroyTexture(g_thumb_textures[i]);
+            g_thumb_textures[i] = NULL;
+        }
+        g_thumb_attempted[i] = false;
     }
-    g_hero_thumb_index = -1;
 }
 
 static void refresh_entry_labels(const FileBrowser *fb) {
@@ -106,9 +109,8 @@ static void refresh_entry_labels(const FileBrowser *fb) {
     }
 }
 
-// À appeler après chaque (re)scan du dossier affiché.
 static void on_directory_changed(const FileBrowser *fb) {
-    clear_hero_thumbnail();
+    clear_thumbnail_cache();
     refresh_entry_labels(fb);
 }
 
@@ -128,10 +130,10 @@ static void draw_rect_outline(SDL_Renderer *r, int x, int y, int w, int h,
     }
 }
 
-static void draw_text(SDL_Renderer *r, const char *text, int x, int y, SDL_Color color) {
-    if (!g_font || !text || !text[0]) return;
+static void draw_text_ex(SDL_Renderer *r, TTF_Font *font, const char *text, int x, int y, SDL_Color color) {
+    if (!font || !text || !text[0]) return;
 
-    SDL_Surface *surf = TTF_RenderUTF8_Blended(g_font, text, color);
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, text, color);
     if (!surf) return;
 
     SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
@@ -141,6 +143,10 @@ static void draw_text(SDL_Renderer *r, const char *text, int x, int y, SDL_Color
         SDL_DestroyTexture(tex);
     }
     SDL_FreeSurface(surf);
+}
+
+static void draw_text(SDL_Renderer *r, const char *text, int x, int y, SDL_Color color) {
+    draw_text_ex(r, g_font, text, x, y, color);
 }
 
 static void truncate_to_width(const char *text, int max_w, char *out, size_t outsize) {
@@ -163,19 +169,9 @@ static void truncate_to_width(const char *text, int max_w, char *out, size_t out
     }
 }
 
-// Charge la miniature de l'entrée `index` si elle diffère de celle déjà en
-// cache. Pour un dossier, va chercher la première page du premier comic
-// trouvé à l'intérieur (récursivement).
-static void ensure_hero_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *fb, int index) {
-    if (index == g_hero_thumb_index) return; // déjà la bonne miniature en cache
-
-    if (g_hero_thumb) {
-        SDL_DestroyTexture(g_hero_thumb);
-        g_hero_thumb = NULL;
-    }
-    g_hero_thumb_index = index;
-
-    if (index < 0 || index >= fb->entry_count) return;
+static void ensure_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *fb, int index) {
+    if (g_thumb_attempted[index]) return;
+    g_thumb_attempted[index] = true;
 
     const FBEntry *e = &fb->entries[index];
     char full_path[FB_MAX_PATH];
@@ -185,18 +181,37 @@ static void ensure_hero_thumbnail_loaded(SDL_Renderer *renderer, const FileBrows
     if (e->is_dir) {
         char representative[FB_MAX_PATH];
         if (fb_find_representative_comic(full_path, representative, sizeof(representative), 6)) {
-            g_hero_thumb = thumbnail_get(renderer, full_path, representative,
-                                          HERO_COVER_W, HERO_COVER_H);
+            g_thumb_textures[index] = thumbnail_get(renderer, full_path, representative,
+                                                     GRID_TILE_W, GRID_COVER_H);
         }
     } else {
-        g_hero_thumb = thumbnail_get(renderer, full_path, full_path,
-                                      HERO_COVER_W, HERO_COVER_H);
+        g_thumb_textures[index] = thumbnail_get(renderer, full_path, full_path,
+                                                 GRID_TILE_W, GRID_COVER_H);
     }
 }
 
+// Barre latérale façon Noboru : titre de l'appli + entrée de menu "Library"
+// (seule section pertinente vu que tout est local, pas de catalogues en ligne).
+static void render_sidebar(SDL_Renderer *renderer) {
+    draw_rect(renderer, 0, 0, SIDEBAR_W, SCREEN_H, 14, 14, 20, 255);
+
+    SDL_Color title_color = { 235, 235, 235, 255 };
+    SDL_Color accent = { 255, 210, 90, 255 };
+
+    draw_text_ex(renderer, g_font_title, "Comic Reader", 28, 40, title_color);
+
+    // Entrée de menu "Library", mise en avant comme section active.
+    int menu_y = 130;
+    draw_rect(renderer, 0, menu_y - 8, SIDEBAR_W, 44, 40, 40, 58, 255);
+    draw_rect(renderer, 0, menu_y - 8, 4, 44, 255, 210, 90, 255); // liseré d'accent à gauche
+    draw_text(renderer, "LIBRARY", 28, menu_y, accent);
+}
+
 static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
-    SDL_SetRenderDrawColor(renderer, 20, 20, 28, 255);
+    SDL_SetRenderDrawColor(renderer, 24, 24, 32, 255);
     SDL_RenderClear(renderer);
+
+    render_sidebar(renderer);
 
     SDL_Color white  = { 235, 235, 235, 255 };
     SDL_Color gray   = { 150, 150, 160, 255 };
@@ -204,83 +219,72 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
     SDL_Color done_color = { 120, 200, 120, 255 };
     SDL_Color prog_color = { 120, 170, 220, 255 };
 
-    draw_text(renderer, "Comic Reader", OUTER_MARGIN, 24, gray);
+    int content_x = SIDEBAR_W + CONTENT_MARGIN;
 
     if (fb->entry_count == 0) {
-        draw_text(renderer, "Aucun fichier .cbz/.cbr ni dossier ici.", OUTER_MARGIN, 100, gray);
-        draw_text(renderer, "B: dossier parent   +: quitter", OUTER_MARGIN, SCREEN_H - 34, gray);
+        draw_text(renderer, "Aucun fichier .cbz/.cbr ni dossier ici.", content_x, GRID_TOP, gray);
+        draw_text(renderer, "B: dossier parent   +: quitter", content_x, SCREEN_H - 34, gray);
         return;
     }
 
-    ensure_hero_thumbnail_loaded(renderer, fb, fb->selected);
-
-    // --- Carte de prévisualisation (reflète l'élément sélectionné) ---
-    int hero_y = HEADER_H;
-    const FBEntry *hero_entry = &fb->entries[fb->selected];
-
-    if (g_hero_thumb) {
-        SDL_Rect dst = { OUTER_MARGIN, hero_y, HERO_COVER_W, HERO_COVER_H };
-        SDL_RenderCopy(renderer, g_hero_thumb, NULL, &dst);
-    } else {
-        draw_rect(renderer, OUTER_MARGIN, hero_y, HERO_COVER_W, HERO_COVER_H, 45, 45, 60, 255);
-    }
-
-    draw_rect_outline(renderer, OUTER_MARGIN, hero_y, HERO_COVER_W, HERO_COVER_H,
-                       255, 210, 90, 255, 4);
-
-    int hero_text_x = OUTER_MARGIN + HERO_COVER_W + HERO_GAP;
-    int hero_text_max_w = SCREEN_W - hero_text_x - OUTER_MARGIN;
-    char hero_title[96];
-    truncate_to_width(hero_entry->name, hero_text_max_w, hero_title, sizeof(hero_title));
-    draw_text(renderer, hero_title, hero_text_x, hero_y + 10, accent);
-
-    if (g_entry_labels[fb->selected][0] != '\0') {
-        bool is_done = (strcmp(g_entry_labels[fb->selected], "Lu") == 0);
-        draw_text(renderer, g_entry_labels[fb->selected], hero_text_x, hero_y + 46,
-                   is_done ? done_color : prog_color);
-    }
-
-    // --- Liste complète (tous les éléments, y compris celui prévisualisé) ---
-    int list_top = hero_y + HERO_COVER_H + HERO_GAP;
-    int available_h = SCREEN_H - list_top - FOOTER_H;
-    int visible_rows = available_h / LIST_ROW_H;
+    int total_rows = (fb->entry_count + GRID_COLS - 1) / GRID_COLS;
+    int available_h = SCREEN_H - GRID_TOP - GRID_FOOTER_H;
+    int visible_rows = available_h / GRID_ROW_H;
     if (visible_rows < 1) visible_rows = 1;
 
-    int start = fb->selected - visible_rows / 2;
-    if (start < 0) start = 0;
-    if (start + visible_rows > fb->entry_count) {
-        start = fb->entry_count - visible_rows;
-        if (start < 0) start = 0;
+    int selected_row = fb->selected / GRID_COLS;
+
+    int scroll_row = selected_row - visible_rows / 2;
+    if (scroll_row < 0) scroll_row = 0;
+    if (scroll_row + visible_rows > total_rows) {
+        scroll_row = total_rows - visible_rows;
+        if (scroll_row < 0) scroll_row = 0;
     }
 
-    for (int row = 0; row < visible_rows && start + row < fb->entry_count; row++) {
-        int entry_index = start + row;
-        int y = list_top + row * LIST_ROW_H;
-        const FBEntry *e = &fb->entries[entry_index];
+    for (int row = scroll_row; row < total_rows && row < scroll_row + visible_rows; row++) {
+        for (int col = 0; col < GRID_COLS; col++) {
+            int index = row * GRID_COLS + col;
+            if (index >= fb->entry_count) break;
 
-        bool is_selected = (entry_index == fb->selected);
-        if (is_selected) {
-            draw_rect(renderer, OUTER_MARGIN - 10, y - 4, SCREEN_W - 2 * (OUTER_MARGIN - 10),
-                       LIST_ROW_H - 6, 60, 60, 90, 255);
-        }
+            ensure_thumbnail_loaded(renderer, fb, index);
 
-        draw_text(renderer, e->name, OUTER_MARGIN, y, is_selected ? accent : white);
+            int tile_x = content_x + col * (GRID_TILE_W + GRID_GAP);
+            int tile_y = GRID_TOP + (row - scroll_row) * GRID_ROW_H;
 
-        if (g_entry_labels[entry_index][0] != '\0') {
-            int name_w = text_width(e->name);
-            int progress_x = OUTER_MARGIN + name_w + 24;
-            bool is_done = (strcmp(g_entry_labels[entry_index], "Lu") == 0);
-            SDL_Color color = is_done ? done_color : prog_color;
+            const FBEntry *e = &fb->entries[index];
+            SDL_Texture *thumb = g_thumb_textures[index];
 
-            int label_w = text_width(g_entry_labels[entry_index]);
-            if (progress_x + label_w < SCREEN_W - 20) {
-                draw_text(renderer, g_entry_labels[entry_index], progress_x, y, color);
+            if (thumb) {
+                SDL_Rect dst = { tile_x, tile_y, GRID_TILE_W, GRID_COVER_H };
+                SDL_RenderCopy(renderer, thumb, NULL, &dst);
+            } else {
+                draw_rect(renderer, tile_x, tile_y, GRID_TILE_W, GRID_COVER_H, 45, 45, 60, 255);
+                char fallback[64];
+                truncate_to_width(e->name, GRID_TILE_W - 20, fallback, sizeof(fallback));
+                draw_text(renderer, fallback, tile_x + 10, tile_y + GRID_COVER_H / 2 - 12, gray);
+            }
+
+            if (index == fb->selected) {
+                draw_rect_outline(renderer, tile_x, tile_y, GRID_TILE_W, GRID_COVER_H,
+                                   255, 210, 90, 255, 4);
+            }
+
+            char title_display[64];
+            truncate_to_width(e->name, GRID_TILE_W, title_display, sizeof(title_display));
+            draw_text(renderer, title_display, tile_x, tile_y + GRID_COVER_H + 8,
+                       index == fb->selected ? accent : white);
+
+            if (g_entry_labels[index][0] != '\0') {
+                bool is_done = (strcmp(g_entry_labels[index], "Lu") == 0);
+                SDL_Color badge_color = is_done ? done_color : prog_color;
+                draw_text(renderer, g_entry_labels[index], tile_x,
+                           tile_y + GRID_COVER_H + 8 + GRID_TITLE_H - 10, badge_color);
             }
         }
     }
 
-    draw_text(renderer, "A: ouvrir   B: dossier parent   Haut/Bas: naviguer   +: quitter",
-               OUTER_MARGIN, SCREEN_H - 34, gray);
+    draw_text(renderer, "A: ouvrir   B: dossier parent   Stick/D-pad: naviguer   +: quitter",
+               content_x, SCREEN_H - 34, gray);
 }
 
 static SDL_Texture *decode_page_to_texture(SDL_Renderer *renderer, void *data, size_t size) {
@@ -405,7 +409,7 @@ int main(int argc, char *argv[]) {
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 
-    load_system_font(24);
+    load_system_font();
 
     SDL_GameController *pad = NULL;
     if (SDL_NumJoysticks() > 0) {
@@ -427,8 +431,9 @@ int main(int argc, char *argv[]) {
 
     AppState state = APP_STATE_BROWSER;
     bool running = true;
-    bool prev_up = false, prev_down = false, prev_a = false, prev_b = false,
-         prev_plus = false, prev_l = false, prev_r = false, prev_r3 = false;
+    bool prev_up = false, prev_down = false, prev_left = false, prev_right = false,
+         prev_a = false, prev_b = false, prev_plus = false, prev_l = false,
+         prev_r = false, prev_r3 = false;
 
     while (running) {
         SDL_Event event;
@@ -436,7 +441,7 @@ int main(int argc, char *argv[]) {
             if (event.type == SDL_QUIT) running = false;
         }
 
-        bool up = false, down = false;
+        bool up = false, down = false, left = false, right = false;
         bool a = false, b = false, plus = false, l = false, r = false, r3 = false;
         int right_y = 0, left_x = 0, left_y = 0;
         if (pad) {
@@ -444,6 +449,10 @@ int main(int argc, char *argv[]) {
                  || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
             down  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN)
                  || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
+            left  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT)
+                 || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
+            right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
+                 || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
             a    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B);
             b    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A);
             plus = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
@@ -457,8 +466,24 @@ int main(int argc, char *argv[]) {
         }
 
         if (state == APP_STATE_BROWSER) {
-            if (up && !prev_up)     fb_move_selection(&fb, -1);
-            if (down && !prev_down) fb_move_selection(&fb, 1);
+            int total = fb.entry_count;
+            int row = fb.selected / GRID_COLS;
+            int col = fb.selected % GRID_COLS;
+            int total_rows = (total + GRID_COLS - 1) / GRID_COLS;
+
+            if (up && !prev_up && row > 0) {
+                fb.selected -= GRID_COLS;
+            }
+            if (down && !prev_down && row < total_rows - 1) {
+                int candidate = fb.selected + GRID_COLS;
+                fb.selected = (candidate < total) ? candidate : total - 1;
+            }
+            if (left && !prev_left && col > 0) {
+                fb.selected -= 1;
+            }
+            if (right && !prev_right && col < GRID_COLS - 1 && fb.selected + 1 < total) {
+                fb.selected += 1;
+            }
 
             if (a && !prev_a) {
                 if (fb_selected_is_dir(&fb)) {
@@ -551,7 +576,7 @@ int main(int argc, char *argv[]) {
             running = false;
         }
 
-        prev_up = up; prev_down = down;
+        prev_up = up; prev_down = down; prev_left = left; prev_right = right;
         prev_a = a; prev_b = b; prev_plus = plus; prev_l = l; prev_r = r; prev_r3 = r3;
 
         if (state == APP_STATE_BROWSER) {
@@ -563,9 +588,10 @@ int main(int argc, char *argv[]) {
     }
 
     if (page_tex) SDL_DestroyTexture(page_tex);
-    clear_hero_thumbnail();
+    clear_thumbnail_cache();
     if (pad) SDL_GameControllerClose(pad);
     if (g_font) TTF_CloseFont(g_font);
+    if (g_font_title) TTF_CloseFont(g_font_title);
     IMG_Quit();
     TTF_Quit();
     SDL_DestroyRenderer(renderer);
