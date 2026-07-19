@@ -23,16 +23,20 @@
 #define PAN_SPEED_PER_FRAME 14.0f
 #define STICK_DEADZONE 8000
 
-// --- Disposition de la grille bibliothèque ---
-#define GRID_COLS 3
-#define GRID_OUTER_MARGIN 40
-#define GRID_GAP 24
-#define GRID_HEADER_H 70
-#define GRID_FOOTER_H 40
-#define GRID_TILE_W ((SCREEN_W - 2 * GRID_OUTER_MARGIN - (GRID_COLS - 1) * GRID_GAP) / GRID_COLS)
-#define GRID_COVER_H ((int)(GRID_TILE_W * 1.4f))
-#define GRID_TITLE_H 30
-#define GRID_ROW_H (GRID_COVER_H + 10 + GRID_TITLE_H + GRID_GAP)
+// --- Disposition de la vue bibliothèque hybride ---
+#define OUTER_MARGIN 40
+#define HEADER_H 70
+#define FOOTER_H 40
+
+// Carte "mise en avant" : uniquement pour le tout premier élément du dossier.
+// C'est la SEULE miniature générée à l'ouverture d'un dossier — le reste de
+// la liste est du texte simple, pour ne jamais avoir de délai de chargement
+// proportionnel au nombre de fichiers.
+#define HERO_COVER_W 220
+#define HERO_COVER_H 310
+#define HERO_GAP 30
+
+#define LIST_ROW_H 46
 
 typedef enum {
     APP_STATE_BROWSER,
@@ -45,10 +49,11 @@ static PlFontData g_font_data;
 // Libellés de progression ("Lu" / "En cours (p. X/Y)"), un par entrée du browser.
 static char g_entry_labels[FB_MAX_ENTRIES][40];
 
-// Textures de miniatures pour la grille, un par entrée. NULL si pas encore
-// chargée (ou si le chargement a échoué — voir g_thumb_attempted).
-static SDL_Texture *g_thumb_textures[FB_MAX_ENTRIES];
-static bool g_thumb_attempted[FB_MAX_ENTRIES];
+// Une seule miniature en cache à la fois : celle de l'élément actuellement
+// sélectionné. Se recharge à chaque changement de sélection (le cache disque
+// du module thumbnail rend les rechargements rapides après la 1re génération).
+static SDL_Texture *g_hero_thumb = NULL;
+static int g_hero_thumb_index = -1; // index d'entrée représenté par g_hero_thumb (-1 = aucun)
 
 static bool load_system_font(int point_size) {
     Result rc = plGetSharedFontByType(&g_font_data, PlSharedFontType_Standard);
@@ -71,16 +76,12 @@ static int text_width(const char *text) {
     return w;
 }
 
-// Libère toutes les textures de miniatures en cache et réinitialise les
-// drapeaux "tenté" — à appeler à chaque fois qu'on change de dossier affiché.
-static void clear_thumbnail_cache(void) {
-    for (int i = 0; i < FB_MAX_ENTRIES; i++) {
-        if (g_thumb_textures[i]) {
-            SDL_DestroyTexture(g_thumb_textures[i]);
-            g_thumb_textures[i] = NULL;
-        }
-        g_thumb_attempted[i] = false;
+static void clear_hero_thumbnail(void) {
+    if (g_hero_thumb) {
+        SDL_DestroyTexture(g_hero_thumb);
+        g_hero_thumb = NULL;
     }
+    g_hero_thumb_index = -1;
 }
 
 static void refresh_entry_labels(const FileBrowser *fb) {
@@ -105,11 +106,9 @@ static void refresh_entry_labels(const FileBrowser *fb) {
     }
 }
 
-// À appeler après chaque (re)scan du dossier affiché (fb_init, entrée dans un
-// dossier, remontée) : réinitialise le cache de miniatures et recalcule les
-// libellés de progression.
+// À appeler après chaque (re)scan du dossier affiché.
 static void on_directory_changed(const FileBrowser *fb) {
-    clear_thumbnail_cache();
+    clear_hero_thumbnail();
     refresh_entry_labels(fb);
 }
 
@@ -144,8 +143,6 @@ static void draw_text(SDL_Renderer *r, const char *text, int x, int y, SDL_Color
     SDL_FreeSurface(surf);
 }
 
-// Tronque `text` avec "…" pour qu'il tienne dans max_w pixels, écrit le
-// résultat dans out (taille outsize).
 static void truncate_to_width(const char *text, int max_w, char *out, size_t outsize) {
     strncpy(out, text, outsize - 1);
     out[outsize - 1] = '\0';
@@ -166,11 +163,19 @@ static void truncate_to_width(const char *text, int max_w, char *out, size_t out
     }
 }
 
-// Charge (si pas déjà tenté) la miniature de l'entrée `index`, dossier ou
-// fichier comic. Ne fait rien si déjà chargée ou déjà tentée sans succès.
-static void ensure_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *fb, int index) {
-    if (g_thumb_attempted[index]) return;
-    g_thumb_attempted[index] = true;
+// Charge la miniature de l'entrée `index` si elle diffère de celle déjà en
+// cache. Pour un dossier, va chercher la première page du premier comic
+// trouvé à l'intérieur (récursivement).
+static void ensure_hero_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *fb, int index) {
+    if (index == g_hero_thumb_index) return; // déjà la bonne miniature en cache
+
+    if (g_hero_thumb) {
+        SDL_DestroyTexture(g_hero_thumb);
+        g_hero_thumb = NULL;
+    }
+    g_hero_thumb_index = index;
+
+    if (index < 0 || index >= fb->entry_count) return;
 
     const FBEntry *e = &fb->entries[index];
     char full_path[FB_MAX_PATH];
@@ -180,14 +185,12 @@ static void ensure_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *f
     if (e->is_dir) {
         char representative[FB_MAX_PATH];
         if (fb_find_representative_comic(full_path, representative, sizeof(representative), 6)) {
-            g_thumb_textures[index] = thumbnail_get(renderer, full_path, representative,
-                                                     GRID_TILE_W, GRID_COVER_H);
+            g_hero_thumb = thumbnail_get(renderer, full_path, representative,
+                                          HERO_COVER_W, HERO_COVER_H);
         }
-        // Sinon : dossier vide de comics, pas de miniature, on affichera un
-        // simple encadré avec le nom (voir render_library).
     } else {
-        g_thumb_textures[index] = thumbnail_get(renderer, full_path, full_path,
-                                                 GRID_TILE_W, GRID_COVER_H);
+        g_hero_thumb = thumbnail_get(renderer, full_path, full_path,
+                                      HERO_COVER_W, HERO_COVER_H);
     }
 }
 
@@ -201,76 +204,83 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
     SDL_Color done_color = { 120, 200, 120, 255 };
     SDL_Color prog_color = { 120, 170, 220, 255 };
 
-    draw_text(renderer, "Comic Reader", GRID_OUTER_MARGIN, 24, gray);
+    draw_text(renderer, "Comic Reader", OUTER_MARGIN, 24, gray);
 
     if (fb->entry_count == 0) {
-        draw_text(renderer, "Aucun fichier .cbz/.cbr ni dossier ici.", GRID_OUTER_MARGIN, 100, gray);
-        draw_text(renderer, "B: dossier parent   +: quitter", GRID_OUTER_MARGIN, SCREEN_H - 34, gray);
+        draw_text(renderer, "Aucun fichier .cbz/.cbr ni dossier ici.", OUTER_MARGIN, 100, gray);
+        draw_text(renderer, "B: dossier parent   +: quitter", OUTER_MARGIN, SCREEN_H - 34, gray);
         return;
     }
 
-    int total_rows = (fb->entry_count + GRID_COLS - 1) / GRID_COLS;
-    int available_h = SCREEN_H - GRID_HEADER_H - GRID_FOOTER_H;
-    int visible_rows = available_h / GRID_ROW_H;
-    if (visible_rows < 1) visible_rows = 1;
+    ensure_hero_thumbnail_loaded(renderer, fb, fb->selected);
 
-    int selected_row = fb->selected / GRID_COLS;
+    // --- Carte de prévisualisation (reflète l'élément sélectionné) ---
+    int hero_y = HEADER_H;
+    const FBEntry *hero_entry = &fb->entries[fb->selected];
 
-    int scroll_row = selected_row - visible_rows / 2;
-    if (scroll_row < 0) scroll_row = 0;
-    if (scroll_row + visible_rows > total_rows) {
-        scroll_row = total_rows - visible_rows;
-        if (scroll_row < 0) scroll_row = 0;
+    if (g_hero_thumb) {
+        SDL_Rect dst = { OUTER_MARGIN, hero_y, HERO_COVER_W, HERO_COVER_H };
+        SDL_RenderCopy(renderer, g_hero_thumb, NULL, &dst);
+    } else {
+        draw_rect(renderer, OUTER_MARGIN, hero_y, HERO_COVER_W, HERO_COVER_H, 45, 45, 60, 255);
     }
 
-    for (int row = scroll_row; row < total_rows && row < scroll_row + visible_rows; row++) {
-        for (int col = 0; col < GRID_COLS; col++) {
-            int index = row * GRID_COLS + col;
-            if (index >= fb->entry_count) break;
+    draw_rect_outline(renderer, OUTER_MARGIN, hero_y, HERO_COVER_W, HERO_COVER_H,
+                       255, 210, 90, 255, 4);
 
-            ensure_thumbnail_loaded(renderer, fb, index);
+    int hero_text_x = OUTER_MARGIN + HERO_COVER_W + HERO_GAP;
+    int hero_text_max_w = SCREEN_W - hero_text_x - OUTER_MARGIN;
+    char hero_title[96];
+    truncate_to_width(hero_entry->name, hero_text_max_w, hero_title, sizeof(hero_title));
+    draw_text(renderer, hero_title, hero_text_x, hero_y + 10, accent);
 
-            int tile_x = GRID_OUTER_MARGIN + col * (GRID_TILE_W + GRID_GAP);
-            int tile_y = GRID_HEADER_H + (row - scroll_row) * GRID_ROW_H;
+    if (g_entry_labels[fb->selected][0] != '\0') {
+        bool is_done = (strcmp(g_entry_labels[fb->selected], "Lu") == 0);
+        draw_text(renderer, g_entry_labels[fb->selected], hero_text_x, hero_y + 46,
+                   is_done ? done_color : prog_color);
+    }
 
-            const FBEntry *e = &fb->entries[index];
-            SDL_Texture *thumb = g_thumb_textures[index];
+    // --- Liste complète (tous les éléments, y compris celui prévisualisé) ---
+    int list_top = hero_y + HERO_COVER_H + HERO_GAP;
+    int available_h = SCREEN_H - list_top - FOOTER_H;
+    int visible_rows = available_h / LIST_ROW_H;
+    if (visible_rows < 1) visible_rows = 1;
 
-            if (thumb) {
-                int tw, th;
-                SDL_QueryTexture(thumb, NULL, NULL, &tw, &th);
-                SDL_Rect dst = { tile_x, tile_y, GRID_TILE_W, GRID_COVER_H };
-                SDL_RenderCopy(renderer, thumb, NULL, &dst);
-            } else {
-                // Pas de couverture disponible (dossier vide, image illisible...) :
-                // encadré neutre avec le nom du dossier/fichier à la place.
-                draw_rect(renderer, tile_x, tile_y, GRID_TILE_W, GRID_COVER_H, 45, 45, 60, 255);
-                char fallback[64];
-                truncate_to_width(e->name, GRID_TILE_W - 20, fallback, sizeof(fallback));
-                draw_text(renderer, fallback, tile_x + 10, tile_y + GRID_COVER_H / 2 - 14, gray);
-            }
+    int start = fb->selected - visible_rows / 2;
+    if (start < 0) start = 0;
+    if (start + visible_rows > fb->entry_count) {
+        start = fb->entry_count - visible_rows;
+        if (start < 0) start = 0;
+    }
 
-            if (index == fb->selected) {
-                draw_rect_outline(renderer, tile_x, tile_y, GRID_TILE_W, GRID_COVER_H,
-                                   255, 210, 90, 255, 4);
-            }
+    for (int row = 0; row < visible_rows && start + row < fb->entry_count; row++) {
+        int entry_index = start + row;
+        int y = list_top + row * LIST_ROW_H;
+        const FBEntry *e = &fb->entries[entry_index];
 
-            char title_display[64];
-            truncate_to_width(e->name, GRID_TILE_W, title_display, sizeof(title_display));
-            draw_text(renderer, title_display, tile_x, tile_y + GRID_COVER_H + 10,
-                       index == fb->selected ? accent : white);
+        bool is_selected = (entry_index == fb->selected);
+        if (is_selected) {
+            draw_rect(renderer, OUTER_MARGIN - 10, y - 4, SCREEN_W - 2 * (OUTER_MARGIN - 10),
+                       LIST_ROW_H - 6, 60, 60, 90, 255);
+        }
 
-            if (g_entry_labels[index][0] != '\0') {
-                bool is_done = (strcmp(g_entry_labels[index], "Lu") == 0);
-                SDL_Color badge_color = is_done ? done_color : prog_color;
-                draw_text(renderer, g_entry_labels[index], tile_x,
-                           tile_y + GRID_COVER_H + 10 + GRID_TITLE_H - 12, badge_color);
+        draw_text(renderer, e->name, OUTER_MARGIN, y, is_selected ? accent : white);
+
+        if (g_entry_labels[entry_index][0] != '\0') {
+            int name_w = text_width(e->name);
+            int progress_x = OUTER_MARGIN + name_w + 24;
+            bool is_done = (strcmp(g_entry_labels[entry_index], "Lu") == 0);
+            SDL_Color color = is_done ? done_color : prog_color;
+
+            int label_w = text_width(g_entry_labels[entry_index]);
+            if (progress_x + label_w < SCREEN_W - 20) {
+                draw_text(renderer, g_entry_labels[entry_index], progress_x, y, color);
             }
         }
     }
 
-    draw_text(renderer, "A: ouvrir   B: dossier parent   Stick/D-pad: naviguer   +: quitter",
-               GRID_OUTER_MARGIN, SCREEN_H - 34, gray);
+    draw_text(renderer, "A: ouvrir   B: dossier parent   Haut/Bas: naviguer   +: quitter",
+               OUTER_MARGIN, SCREEN_H - 34, gray);
 }
 
 static SDL_Texture *decode_page_to_texture(SDL_Renderer *renderer, void *data, size_t size) {
@@ -309,6 +319,17 @@ static void load_current_page(SDL_Renderer *renderer, ComicArchive *ar, SDL_Text
     *out_tex = decode_page_to_texture(renderer, data, size);
 }
 
+static float min_zoom_for_texture(SDL_Texture *tex) {
+    if (!tex) return ZOOM_MIN;
+    int tw, th;
+    SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
+    if (tw <= 0 || th <= 0) return ZOOM_MIN;
+
+    float cover_scale = SDL_max((float)SCREEN_W / tw, (float)SCREEN_H / th);
+    float fit_scale = SDL_min((float)SCREEN_W / tw, (float)SCREEN_H / th);
+    return fit_scale / cover_scale;
+}
+
 static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_index,
                            int page_count, float zoom, float *pan_x, float *pan_y) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -318,9 +339,6 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
         int tex_w, tex_h;
         SDL_QueryTexture(tex, NULL, NULL, &tex_w, &tex_h);
 
-        // Mode "cover" : l'image remplit tout l'écran (collée aux bords), quitte
-        // à rogner le haut/bas ou les côtés selon son ratio d'aspect. On utilise
-        // le maximum des deux ratios au lieu du minimum (letterbox) pour ça.
         float base_scale = SDL_max((float)SCREEN_W / tex_w, (float)SCREEN_H / tex_h);
         int draw_w = (int)(tex_w * base_scale * zoom);
         int draw_h = (int)(tex_h * base_scale * zoom);
@@ -356,21 +374,6 @@ static void save_current_progress(const ComicArchive *ar) {
     if (ar->page_count > 0) {
         progress_save(ar->archive_path, ar->current_page, ar->page_count);
     }
-}
-
-// Calcule le niveau de zoom minimum (relatif à la base "cover" = 1.0, qui
-// remplit tout l'écran) permettant de voir la page entière, quel que soit
-// son ratio d'aspect. En dessous de ce niveau, on afficherait un espace vide
-// inutile ; au-dessus, on recommence à rogner l'image.
-static float min_zoom_for_texture(SDL_Texture *tex) {
-    if (!tex) return ZOOM_MIN;
-    int tw, th;
-    SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
-    if (tw <= 0 || th <= 0) return ZOOM_MIN;
-
-    float cover_scale = SDL_max((float)SCREEN_W / tw, (float)SCREEN_H / th);
-    float fit_scale = SDL_min((float)SCREEN_W / tw, (float)SCREEN_H / th);
-    return fit_scale / cover_scale; // toujours <= 1.0
 }
 
 int main(int argc, char *argv[]) {
@@ -424,9 +427,8 @@ int main(int argc, char *argv[]) {
 
     AppState state = APP_STATE_BROWSER;
     bool running = true;
-    bool prev_up = false, prev_down = false, prev_left = false, prev_right = false,
-         prev_a = false, prev_b = false, prev_plus = false, prev_l = false,
-         prev_r = false, prev_r3 = false;
+    bool prev_up = false, prev_down = false, prev_a = false, prev_b = false,
+         prev_plus = false, prev_l = false, prev_r = false, prev_r3 = false;
 
     while (running) {
         SDL_Event event;
@@ -434,7 +436,7 @@ int main(int argc, char *argv[]) {
             if (event.type == SDL_QUIT) running = false;
         }
 
-        bool up = false, down = false, left = false, right = false;
+        bool up = false, down = false;
         bool a = false, b = false, plus = false, l = false, r = false, r3 = false;
         int right_y = 0, left_x = 0, left_y = 0;
         if (pad) {
@@ -442,10 +444,6 @@ int main(int argc, char *argv[]) {
                  || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
             down  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN)
                  || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) > 16000;
-            left  = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT)
-                 || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) < -16000;
-            right = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
-                 || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) > 16000;
             a    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B);
             b    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A);
             plus = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
@@ -459,24 +457,8 @@ int main(int argc, char *argv[]) {
         }
 
         if (state == APP_STATE_BROWSER) {
-            int total = fb.entry_count;
-            int row = fb.selected / GRID_COLS;
-            int col = fb.selected % GRID_COLS;
-            int total_rows = (total + GRID_COLS - 1) / GRID_COLS;
-
-            if (up && !prev_up && row > 0) {
-                fb.selected -= GRID_COLS;
-            }
-            if (down && !prev_down && row < total_rows - 1) {
-                int candidate = fb.selected + GRID_COLS;
-                fb.selected = (candidate < total) ? candidate : total - 1;
-            }
-            if (left && !prev_left && col > 0) {
-                fb.selected -= 1;
-            }
-            if (right && !prev_right && col < GRID_COLS - 1 && fb.selected + 1 < total) {
-                fb.selected += 1;
-            }
+            if (up && !prev_up)     fb_move_selection(&fb, -1);
+            if (down && !prev_down) fb_move_selection(&fb, 1);
 
             if (a && !prev_a) {
                 if (fb_selected_is_dir(&fb)) {
@@ -518,10 +500,6 @@ int main(int argc, char *argv[]) {
                 if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
             }
 
-            // Déplacement (pan) : stick gauche. Toujours actif, même au zoom
-            // minimum — en mode "cover" l'image dépasse déjà de l'écran sur un
-            // axe par défaut, donc le clamp dans render_reader gère les bornes
-            // réelles quel que soit le niveau de zoom.
             if (abs(left_x) > STICK_DEADZONE) {
                 pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
             }
@@ -564,7 +542,7 @@ int main(int argc, char *argv[]) {
                 }
                 ar_close(&ar);
                 state = APP_STATE_BROWSER;
-                refresh_entry_labels(&fb); // met à jour "(p. X/Y)" sans recharger les miniatures
+                refresh_entry_labels(&fb);
             }
         }
 
@@ -573,7 +551,7 @@ int main(int argc, char *argv[]) {
             running = false;
         }
 
-        prev_up = up; prev_down = down; prev_left = left; prev_right = right;
+        prev_up = up; prev_down = down;
         prev_a = a; prev_b = b; prev_plus = plus; prev_l = l; prev_r = r; prev_r3 = r3;
 
         if (state == APP_STATE_BROWSER) {
@@ -585,7 +563,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (page_tex) SDL_DestroyTexture(page_tex);
-    clear_thumbnail_cache();
+    clear_hero_thumbnail();
     if (pad) SDL_GameControllerClose(pad);
     if (g_font) TTF_CloseFont(g_font);
     IMG_Quit();
