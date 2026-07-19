@@ -119,8 +119,8 @@ bool fb_get_selected_path(const FileBrowser *fb, char *out, size_t outsize) {
     return written > 0 && (size_t)written < outsize;
 }
 
-static int name_cmp_str(const void *a, const void *b) {
-    return strcasecmp(*(const char **)a, *(const char **)b);
+bool fb_is_at_root(const FileBrowser *fb) {
+    return strcmp(fb->base_path, fb->root_path) == 0;
 }
 
 bool fb_find_representative_comic(const char *dir_path, char *out, size_t outsize, int depth_limit) {
@@ -129,42 +129,47 @@ bool fb_find_representative_comic(const char *dir_path, char *out, size_t outsiz
     DIR *dir = opendir(dir_path);
     if (!dir) return false;
 
-    char *comic_names[FB_MAX_ENTRIES];
-    int comic_count = 0;
-    char *sub_dir_names[FB_MAX_ENTRIES];
-    int sub_dir_count = 0;
+    // On ne garde que le meilleur candidat vu jusqu'ici (le plus petit
+    // alphabétiquement), au lieu de collecter tous les noms dans des tableaux :
+    // ça évite une grosse consommation de pile, importante ici car la fonction
+    // est récursive (un dossier sans comic direct descend dans ses sous-dossiers).
+    char best_comic[FB_MAX_NAME] = "";
+    char best_subdir[FB_MAX_NAME] = "";
+    bool has_comic = false;
+    bool has_subdir = false;
 
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
 
         if (ent->d_type == DT_DIR) {
-            if (sub_dir_count < FB_MAX_ENTRIES) sub_dir_names[sub_dir_count++] = strdup(ent->d_name);
+            if (!has_subdir || strcasecmp(ent->d_name, best_subdir) < 0) {
+                strncpy(best_subdir, ent->d_name, FB_MAX_NAME - 1);
+                best_subdir[FB_MAX_NAME - 1] = '\0';
+                has_subdir = true;
+            }
         } else if (has_comic_extension(ent->d_name)) {
-            if (comic_count < FB_MAX_ENTRIES) comic_names[comic_count++] = strdup(ent->d_name);
+            if (!has_comic || strcasecmp(ent->d_name, best_comic) < 0) {
+                strncpy(best_comic, ent->d_name, FB_MAX_NAME - 1);
+                best_comic[FB_MAX_NAME - 1] = '\0';
+                has_comic = true;
+            }
         }
     }
     closedir(dir);
 
-    bool found = false;
+    if (has_comic) {
+        int written = snprintf(out, outsize, "%s/%s", dir_path, best_comic);
+        return written > 0 && (size_t)written < outsize;
+    }
 
-    if (comic_count > 0) {
-        qsort(comic_names, comic_count, sizeof(char *), name_cmp_str);
-        int written = snprintf(out, outsize, "%s/%s", dir_path, comic_names[0]);
-        found = written > 0 && (size_t)written < outsize;
-    } else if (sub_dir_count > 0) {
-        qsort(sub_dir_names, sub_dir_count, sizeof(char *), name_cmp_str);
+    if (has_subdir) {
         char sub_path[FB_MAX_PATH];
-        for (int i = 0; i < sub_dir_count && !found; i++) {
-            int written = snprintf(sub_path, sizeof(sub_path), "%s/%s", dir_path, sub_dir_names[i]);
-            if (written > 0 && (size_t)written < (int)sizeof(sub_path)) {
-                found = fb_find_representative_comic(sub_path, out, outsize, depth_limit - 1);
-            }
+        int written = snprintf(sub_path, sizeof(sub_path), "%s/%s", dir_path, best_subdir);
+        if (written > 0 && (size_t)written < (int)sizeof(sub_path)) {
+            return fb_find_representative_comic(sub_path, out, outsize, depth_limit - 1);
         }
     }
 
-    for (int i = 0; i < comic_count; i++) free(comic_names[i]);
-    for (int i = 0; i < sub_dir_count; i++) free(sub_dir_names[i]);
-
-    return found;
+    return false;
 }

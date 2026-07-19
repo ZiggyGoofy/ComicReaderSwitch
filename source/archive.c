@@ -44,14 +44,17 @@ bool ar_open(ComicArchive *ar, const char *path) {
     }
 
     struct archive_entry *entry;
+    int scan_pos = 0; // position dans le flux brut de l'archive (avant tri)
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
         const char *name = archive_entry_pathname(entry);
         if (name && has_image_extension(name) && ar->page_count < AR_MAX_PAGES) {
             strncpy(ar->pages[ar->page_count].name, name, AR_MAX_NAME - 1);
+            ar->pages[ar->page_count].stream_index = scan_pos;
             ar->page_count++;
         }
         // On ne lit pas le contenu ici, juste l'en-tête : on saute les données.
         archive_read_data_skip(a);
+        scan_pos++;
     }
 
     archive_read_free(a);
@@ -76,12 +79,18 @@ void ar_close(ComicArchive *ar) {
 bool ar_extract_page(ComicArchive *ar, int index, void **out_data, size_t *out_size) {
     if (index < 0 || index >= ar->page_count) return false;
 
-    // Si on n'a pas de handle ouvert, ou si la page demandée est déjà "derrière"
-    // (on doit reculer), on (re)ouvre l'archive depuis le début. Sinon, on
-    // continue avec le handle existant : c'est le cas le plus fréquent (tourner
-    // les pages dans l'ordre), qui évite de re-parcourir tout ce qui précède
-    // à chaque appel — important pour les grosses archives à beaucoup de pages.
-    if (!ar->_handle || index < ar->_handle_pos) {
+    // La position à viser dans le FLUX BRUT de l'archive n'est pas forcément
+    // `index` (qui est la position dans notre liste triée alphabétiquement) :
+    // c'est stream_index, mémorisé lors du scan initial dans ar_open.
+    int target_stream_pos = ar->pages[index].stream_index;
+
+    // Si on n'a pas de handle ouvert, ou si la position visée est déjà
+    // "derrière" (on doit reculer dans le flux), on (re)ouvre l'archive
+    // depuis le début. Sinon, on continue avec le handle existant : c'est le
+    // cas le plus fréquent (tourner les pages dans l'ordre), qui évite de
+    // re-parcourir tout ce qui précède à chaque appel — important pour les
+    // grosses archives à beaucoup de pages.
+    if (!ar->_handle || target_stream_pos < ar->_handle_pos) {
         if (ar->_handle) {
             archive_read_free((struct archive *)ar->_handle);
             ar->_handle = NULL;
@@ -105,11 +114,11 @@ bool ar_extract_page(ComicArchive *ar, int index, void **out_data, size_t *out_s
     struct archive_entry *entry = NULL;
     bool found = false;
 
-    while (ar->_handle_pos <= index) {
+    while (ar->_handle_pos <= target_stream_pos) {
         if (archive_read_next_header(a, &entry) != ARCHIVE_OK) {
             break; // fin d'archive ou erreur inattendue
         }
-        if (ar->_handle_pos == index) {
+        if (ar->_handle_pos == target_stream_pos) {
             found = true;
             break; // c'est la page voulue : on ne saute pas son contenu
         }
@@ -118,7 +127,8 @@ bool ar_extract_page(ComicArchive *ar, int index, void **out_data, size_t *out_s
     }
 
     if (!found) {
-        printf("Page introuvable en avançant dans l'archive (index %d)\n", index);
+        printf("Page introuvable en avançant dans l'archive (index %d, position %d)\n",
+               index, target_stream_pos);
         // État incertain : on referme pour forcer une réouverture propre au
         // prochain appel plutôt que de risquer une lecture incohérente.
         archive_read_free(a);
@@ -159,7 +169,7 @@ bool ar_extract_page(ComicArchive *ar, int index, void **out_data, size_t *out_s
         used += (size_t)n;
     }
 
-    ar->_handle_pos = index + 1; // le prochain appel séquentiel continue juste après
+    ar->_handle_pos = target_stream_pos + 1; // le prochain appel séquentiel continue juste après
 
     *out_data = buffer;
     *out_size = used;

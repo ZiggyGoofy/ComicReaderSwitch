@@ -8,6 +8,10 @@
 
 typedef struct {
     char name[AR_MAX_NAME]; // chemin de l'entrée à l'intérieur de l'archive
+    int stream_index;       // position réelle de cette entrée dans le flux brut
+                             // de l'archive (avant tri alphabétique) — nécessaire
+                             // car l'ordre interne d'une archive ne correspond pas
+                             // toujours à l'ordre alphabétique des noms.
 } ArPageEntry;
 
 typedef struct {

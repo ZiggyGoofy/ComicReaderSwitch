@@ -49,4 +49,8 @@ bool fb_selected_is_dir(const FileBrowser *fb);
 // le premier fichier .cbz/.cbr rencontré (même ordre que fb_scan : priorité
 // aux fichiers directs du dossier, sinon on descend dans le premier sous-dossier
 // alphabétique). Écrit son chemin complet dans out. Retourne false si rien trouvé.
+// Retourne true si le dossier actuellement affiché est la racine (le dossier
+// "comics" lui-même), false si on est descendu dans un sous-dossier.
+bool fb_is_at_root(const FileBrowser *fb);
+
 bool fb_find_representative_comic(const char *dir_path, char *out, size_t outsize, int depth_limit);

@@ -23,19 +23,37 @@
 #define PAN_SPEED_PER_FRAME 14.0f
 #define STICK_DEADZONE 8000
 
+// --- Barre de suivi de lecture (tactile + affichage), en bas de l'écran en lecture ---
+#define BAR_MARGIN 40
+#define BAR_OVERLAY_H 74           // hauteur totale de la bande semi-transparente
+#define BAR_TOP_Y (SCREEN_H - BAR_OVERLAY_H)
+#define BAR_TRACK_Y (SCREEN_H - 28)
+#define BAR_TRACK_H 8
+#define BAR_THUMB_R 12
+
 // --- Barre latérale façon Noboru ---
 #define SIDEBAR_W 260
 
 // --- Grille de couvertures dans la zone de contenu (à droite de la sidebar) ---
 #define CONTENT_MARGIN 32
 #define GRID_COLS 4
-#define GRID_GAP 20
+#define GRID_GAP 14
 #define GRID_TOP 36
 #define GRID_FOOTER_H 40
 #define GRID_TILE_W ((SCREEN_W - SIDEBAR_W - 2 * CONTENT_MARGIN - (GRID_COLS - 1) * GRID_GAP) / GRID_COLS)
-#define GRID_COVER_H ((int)(GRID_TILE_W * 1.3f))
-#define GRID_TITLE_H 26
+#define GRID_COVER_H ((int)(GRID_TILE_W * 1.1f))
+#define GRID_TITLE_H 22
 #define GRID_ROW_H (GRID_COVER_H + 8 + GRID_TITLE_H + GRID_GAP)
+
+// --- Vue détail (à l'intérieur d'un dossier de série) : couverture à gauche,
+// liste simple à droite, sans barre latérale ni élément superflu. ---
+#define DETAIL_MARGIN 40
+#define DETAIL_HEADER_H 70
+#define DETAIL_FOOTER_H 40
+#define HERO_COVER_W 260
+#define HERO_COVER_H 380
+#define DETAIL_LIST_GAP 40
+#define DETAIL_ROW_H 46
 
 typedef enum {
     APP_STATE_BROWSER,
@@ -49,6 +67,12 @@ static PlFontData g_font_data;
 static char g_entry_labels[FB_MAX_ENTRIES][40];
 static SDL_Texture *g_thumb_textures[FB_MAX_ENTRIES];
 static bool g_thumb_attempted[FB_MAX_ENTRIES];
+
+// Miniature dynamique unique pour la vue "détail de dossier" (couverture à
+// gauche qui suit la sélection). Séparée du cache multi-miniatures de la
+// grille racine, qui reste utilisé uniquement à la racine du dossier comics.
+static SDL_Texture *g_hero_thumb = NULL;
+static int g_hero_thumb_index = -1;
 
 static bool load_system_font(void) {
     Result rc = plGetSharedFontByType(&g_font_data, PlSharedFontType_Standard);
@@ -85,6 +109,11 @@ static void clear_thumbnail_cache(void) {
         }
         g_thumb_attempted[i] = false;
     }
+    if (g_hero_thumb) {
+        SDL_DestroyTexture(g_hero_thumb);
+        g_hero_thumb = NULL;
+    }
+    g_hero_thumb_index = -1;
 }
 
 static void refresh_entry_labels(const FileBrowser *fb) {
@@ -190,7 +219,37 @@ static void ensure_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *f
     }
 }
 
-// Barre latérale façon Noboru : titre de l'appli + entrée de menu "Library"
+// Charge la miniature de l'entrée `index` pour la vue détail, seulement si
+// elle diffère de celle déjà en cache (se recharge à chaque changement de
+// sélection ; le cache disque du module thumbnail rend ça rapide après la
+// toute première génération).
+static void ensure_hero_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *fb, int index) {
+    if (index == g_hero_thumb_index) return;
+
+    if (g_hero_thumb) {
+        SDL_DestroyTexture(g_hero_thumb);
+        g_hero_thumb = NULL;
+    }
+    g_hero_thumb_index = index;
+
+    if (index < 0 || index >= fb->entry_count) return;
+
+    const FBEntry *e = &fb->entries[index];
+    char full_path[FB_MAX_PATH];
+    int written = snprintf(full_path, sizeof(full_path), "%s/%s", fb->base_path, e->name);
+    if (written <= 0 || (size_t)written >= sizeof(full_path)) return;
+
+    if (e->is_dir) {
+        char representative[FB_MAX_PATH];
+        if (fb_find_representative_comic(full_path, representative, sizeof(representative), 6)) {
+            g_hero_thumb = thumbnail_get(renderer, full_path, representative,
+                                          HERO_COVER_W, HERO_COVER_H);
+        }
+    } else {
+        g_hero_thumb = thumbnail_get(renderer, full_path, full_path,
+                                      HERO_COVER_W, HERO_COVER_H);
+    }
+}
 // (seule section pertinente vu que tout est local, pas de catalogues en ligne).
 static void render_sidebar(SDL_Renderer *renderer) {
     draw_rect(renderer, 0, 0, SIDEBAR_W, SCREEN_H, 14, 14, 20, 255);
@@ -287,6 +346,89 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
                content_x, SCREEN_H - 34, gray);
 }
 
+// Vue détail : utilisée dès qu'on est descendu dans un dossier de série.
+// Couverture dynamique à gauche (suit la sélection), liste simple à droite,
+// sans barre latérale ni élément superflu (pas de lien, pas d'icône de
+// téléchargement — tout est déjà local).
+static void render_folder_detail(SDL_Renderer *renderer, const FileBrowser *fb) {
+    SDL_SetRenderDrawColor(renderer, 20, 20, 28, 255);
+    SDL_RenderClear(renderer);
+
+    SDL_Color white  = { 235, 235, 235, 255 };
+    SDL_Color gray   = { 150, 150, 160, 255 };
+    SDL_Color accent = { 255, 210, 90, 255 };
+    SDL_Color done_color = { 120, 200, 120, 255 };
+    SDL_Color prog_color = { 120, 170, 220, 255 };
+
+    // Titre = nom du dossier courant (dernier segment du chemin), pas le chemin complet.
+    const char *folder_name = strrchr(fb->base_path, '/');
+    folder_name = folder_name ? folder_name + 1 : fb->base_path;
+    draw_text_ex(renderer, g_font_title, folder_name, DETAIL_MARGIN, 20, white);
+
+    if (fb->entry_count == 0) {
+        draw_text(renderer, "Ce dossier est vide.", DETAIL_MARGIN, DETAIL_HEADER_H + 20, gray);
+        draw_text(renderer, "B: dossier parent   +: quitter", DETAIL_MARGIN, SCREEN_H - 34, gray);
+        return;
+    }
+
+    ensure_hero_thumbnail_loaded(renderer, fb, fb->selected);
+
+    // --- Couverture à gauche ---
+    int cover_y = DETAIL_HEADER_H;
+    if (g_hero_thumb) {
+        SDL_Rect dst = { DETAIL_MARGIN, cover_y, HERO_COVER_W, HERO_COVER_H };
+        SDL_RenderCopy(renderer, g_hero_thumb, NULL, &dst);
+    } else {
+        draw_rect(renderer, DETAIL_MARGIN, cover_y, HERO_COVER_W, HERO_COVER_H, 45, 45, 60, 255);
+    }
+    draw_rect_outline(renderer, DETAIL_MARGIN, cover_y, HERO_COVER_W, HERO_COVER_H, 255, 210, 90, 255, 3);
+
+    // --- Liste simple à droite ---
+    int list_x = DETAIL_MARGIN + HERO_COVER_W + DETAIL_LIST_GAP;
+    int list_top = DETAIL_HEADER_H;
+    int available_h = SCREEN_H - list_top - DETAIL_FOOTER_H;
+    int visible_rows = available_h / DETAIL_ROW_H;
+    if (visible_rows < 1) visible_rows = 1;
+
+    int start = fb->selected - visible_rows / 2;
+    if (start < 0) start = 0;
+    if (start + visible_rows > fb->entry_count) {
+        start = fb->entry_count - visible_rows;
+        if (start < 0) start = 0;
+    }
+
+    int list_right_edge = SCREEN_W - DETAIL_MARGIN;
+
+    for (int row = 0; row < visible_rows && start + row < fb->entry_count; row++) {
+        int entry_index = start + row;
+        int y = list_top + row * DETAIL_ROW_H;
+        const FBEntry *e = &fb->entries[entry_index];
+
+        bool is_selected = (entry_index == fb->selected);
+        if (is_selected) {
+            draw_rect(renderer, list_x - 10, y - 4, list_right_edge - list_x + 10,
+                       DETAIL_ROW_H - 6, 45, 45, 65, 255);
+        }
+
+        draw_text(renderer, e->name, list_x, y, is_selected ? accent : white);
+
+        if (g_entry_labels[entry_index][0] != '\0') {
+            int name_w = text_width(e->name);
+            int progress_x = list_x + name_w + 24;
+            bool is_done = (strcmp(g_entry_labels[entry_index], "Lu") == 0);
+            SDL_Color color = is_done ? done_color : prog_color;
+
+            int label_w = text_width(g_entry_labels[entry_index]);
+            if (progress_x + label_w < list_right_edge) {
+                draw_text(renderer, g_entry_labels[entry_index], progress_x, y, color);
+            }
+        }
+    }
+
+    draw_text(renderer, "A: ouvrir   B: dossier parent   Haut/Bas: naviguer   +: quitter",
+               DETAIL_MARGIN, SCREEN_H - 34, gray);
+}
+
 static SDL_Texture *decode_page_to_texture(SDL_Renderer *renderer, void *data, size_t size) {
     SDL_RWops *rw = SDL_RWFromMem(data, (int)size);
     if (!rw) {
@@ -329,7 +471,10 @@ static float min_zoom_for_texture(SDL_Texture *tex) {
     SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
     if (tw <= 0 || th <= 0) return ZOOM_MIN;
 
-    float cover_scale = SDL_max((float)SCREEN_W / tw, (float)SCREEN_H / th);
+    // Le "1.0" de référence est maintenant le calibrage sur la hauteur d'écran
+    // (voir render_reader), pas le mode "cover" — on garde le même calcul du
+    // ratio minimum pour voir la page entière, relatif à cette nouvelle référence.
+    float cover_scale = (float)SCREEN_H / th;
     float fit_scale = SDL_min((float)SCREEN_W / tw, (float)SCREEN_H / th);
     return fit_scale / cover_scale;
 }
@@ -343,7 +488,12 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
         int tex_w, tex_h;
         SDL_QueryTexture(tex, NULL, NULL, &tex_w, &tex_h);
 
-        float base_scale = SDL_max((float)SCREEN_W / tex_w, (float)SCREEN_H / tex_h);
+        // Calibrage par défaut sur la HAUTEUR de l'écran (plutôt que sur la
+        // largeur) : la page remplit toute la hauteur, quitte à rogner les
+        // côtés si elle est plus large que l'écran une fois mise à cette échelle.
+        // C'est le calibrage le plus utile pour lire des pages de comics,
+        // presque toujours plus hautes que larges.
+        float base_scale = (float)SCREEN_H / tex_h;
         int draw_w = (int)(tex_w * base_scale * zoom);
         int draw_h = (int)(tex_h * base_scale * zoom);
 
@@ -367,11 +517,61 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
     }
 
     SDL_Color gray = { 150, 150, 160, 255 };
-    char footer[160];
-    snprintf(footer, sizeof(footer),
-             "Page %d / %d   L/R: page   Stick droit: zoom   Stick gauche: déplacer   B: retour",
-             page_index + 1, page_count);
-    draw_text(renderer, footer, 40, SCREEN_H - 34, gray);
+    SDL_Color accent = { 255, 210, 90, 255 };
+    SDL_Color white = { 235, 235, 235, 255 };
+
+    // Bande semi-transparente en bas de l'écran, contenant le compteur de
+    // page et la barre de suivi tactile.
+    SDL_SetRenderDrawColor(renderer, 10, 10, 14, 190);
+    SDL_Rect overlay = { 0, BAR_TOP_Y, SCREEN_W, BAR_OVERLAY_H };
+    SDL_RenderFillRect(renderer, &overlay);
+
+    char page_counter[32];
+    snprintf(page_counter, sizeof(page_counter), "Page %d / %d", page_index + 1, page_count);
+    draw_text(renderer, page_counter, BAR_MARGIN, BAR_TOP_Y + 8, white);
+
+    const char *hint = "L/R ou barre tactile: page   Stick droit: zoom   B: retour";
+    int hint_w = text_width(hint);
+    draw_text(renderer, hint, SCREEN_W - BAR_MARGIN - hint_w, BAR_TOP_Y + 8, gray);
+
+    // Piste de la barre de progression.
+    int track_left = BAR_MARGIN;
+    int track_right = SCREEN_W - BAR_MARGIN;
+    SDL_SetRenderDrawColor(renderer, 70, 70, 85, 255);
+    SDL_Rect track = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, track_right - track_left, BAR_TRACK_H };
+    SDL_RenderFillRect(renderer, &track);
+
+    // Portion remplie jusqu'à la page courante.
+    float progress_fraction = (page_count > 1) ? (float)page_index / (float)(page_count - 1) : 0.0f;
+    int filled_w = (int)((track_right - track_left) * progress_fraction);
+    SDL_SetRenderDrawColor(renderer, 255, 210, 90, 255);
+    SDL_Rect filled = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, filled_w, BAR_TRACK_H };
+    SDL_RenderFillRect(renderer, &filled);
+
+    // Curseur (cercle simple approximé par un petit carré arrondi visuellement suffisant).
+    int thumb_x = track_left + filled_w;
+    SDL_SetRenderDrawColor(renderer, 255, 230, 150, 255);
+    SDL_Rect thumb = { thumb_x - BAR_THUMB_R, BAR_TRACK_Y - BAR_THUMB_R,
+                       BAR_THUMB_R * 2, BAR_THUMB_R * 2 };
+    SDL_RenderFillRect(renderer, &thumb);
+}
+
+// Convertit une position X (en pixels écran) sur la barre de progression en
+// index de page cible (0-based), en tenant compte des marges de la barre.
+static int page_from_bar_x(int x, int page_count) {
+    if (page_count <= 1) return 0;
+
+    int track_left = BAR_MARGIN;
+    int track_right = SCREEN_W - BAR_MARGIN;
+
+    float fraction = (float)(x - track_left) / (float)(track_right - track_left);
+    if (fraction < 0.0f) fraction = 0.0f;
+    if (fraction > 1.0f) fraction = 1.0f;
+
+    int target = (int)(fraction * (page_count - 1) + 0.5f);
+    if (target < 0) target = 0;
+    if (target >= page_count) target = page_count - 1;
+    return target;
 }
 
 static void save_current_progress(const ComicArchive *ar) {
@@ -408,6 +608,7 @@ int main(int argc, char *argv[]) {
 
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1,
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     load_system_font();
 
@@ -435,10 +636,61 @@ int main(int argc, char *argv[]) {
          prev_a = false, prev_b = false, prev_plus = false, prev_l = false,
          prev_r = false, prev_r3 = false;
 
+    // Suivi du glissement tactile/souris sur la barre de progression (lecture uniquement).
+    bool bar_dragging = false;
+    int drag_target_page = 0;
+
     while (running) {
         SDL_Event event;
+        int events_this_frame = 0;
         while (SDL_PollEvent(&event)) {
+            events_this_frame++;
+            if (events_this_frame > 200) break; // sécurité anti-inondation d'événements
             if (event.type == SDL_QUIT) running = false;
+
+            if (state == APP_STATE_READER) {
+                int touch_x = -1, touch_y = -1;
+                bool is_down = false, is_move = false, is_up = false;
+
+                if (event.type == SDL_FINGERDOWN) {
+                    touch_x = (int)(event.tfinger.x * SCREEN_W);
+                    touch_y = (int)(event.tfinger.y * SCREEN_H);
+                    is_down = true;
+                } else if (event.type == SDL_FINGERMOTION) {
+                    touch_x = (int)(event.tfinger.x * SCREEN_W);
+                    touch_y = (int)(event.tfinger.y * SCREEN_H);
+                    is_move = true;
+                } else if (event.type == SDL_FINGERUP) {
+                    is_up = true;
+                } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+                    touch_x = event.button.x;
+                    touch_y = event.button.y;
+                    is_down = true;
+                } else if (event.type == SDL_MOUSEMOTION) {
+                    touch_x = event.motion.x;
+                    touch_y = event.motion.y;
+                    is_move = true;
+                } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
+                    is_up = true;
+                }
+
+                if (is_down && touch_y >= BAR_TOP_Y && ar.page_count > 0) {
+                    bar_dragging = true;
+                    drag_target_page = page_from_bar_x(touch_x, ar.page_count);
+                } else if (is_move && bar_dragging && ar.page_count > 0) {
+                    drag_target_page = page_from_bar_x(touch_x, ar.page_count);
+                } else if (is_up && bar_dragging) {
+                    bar_dragging = false;
+                    if (drag_target_page != ar.current_page) {
+                        ar.current_page = drag_target_page;
+                        zoom = ZOOM_MIN;
+                        pan_x = 0.0f;
+                        pan_y = 0.0f;
+                        load_current_page(renderer, &ar, &page_tex);
+                        save_current_progress(&ar);
+                    }
+                }
+            }
         }
 
         bool up = false, down = false, left = false, right = false;
@@ -466,23 +718,31 @@ int main(int argc, char *argv[]) {
         }
 
         if (state == APP_STATE_BROWSER) {
-            int total = fb.entry_count;
-            int row = fb.selected / GRID_COLS;
-            int col = fb.selected % GRID_COLS;
-            int total_rows = (total + GRID_COLS - 1) / GRID_COLS;
+            bool at_root = fb_is_at_root(&fb);
 
-            if (up && !prev_up && row > 0) {
-                fb.selected -= GRID_COLS;
-            }
-            if (down && !prev_down && row < total_rows - 1) {
-                int candidate = fb.selected + GRID_COLS;
-                fb.selected = (candidate < total) ? candidate : total - 1;
-            }
-            if (left && !prev_left && col > 0) {
-                fb.selected -= 1;
-            }
-            if (right && !prev_right && col < GRID_COLS - 1 && fb.selected + 1 < total) {
-                fb.selected += 1;
+            if (at_root) {
+                int total = fb.entry_count;
+                int row = fb.selected / GRID_COLS;
+                int col = fb.selected % GRID_COLS;
+                int total_rows = (total + GRID_COLS - 1) / GRID_COLS;
+
+                if (up && !prev_up && row > 0) {
+                    fb.selected -= GRID_COLS;
+                }
+                if (down && !prev_down && row < total_rows - 1) {
+                    int candidate = fb.selected + GRID_COLS;
+                    fb.selected = (candidate < total) ? candidate : total - 1;
+                }
+                if (left && !prev_left && col > 0) {
+                    fb.selected -= 1;
+                }
+                if (right && !prev_right && col < GRID_COLS - 1 && fb.selected + 1 < total) {
+                    fb.selected += 1;
+                }
+            } else {
+                // Vue détail : liste simple, uniquement haut/bas.
+                if (up && !prev_up)     fb_move_selection(&fb, -1);
+                if (down && !prev_down) fb_move_selection(&fb, 1);
             }
 
             if (a && !prev_a) {
@@ -529,7 +789,7 @@ int main(int argc, char *argv[]) {
                 pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
             }
             if (abs(left_y) > STICK_DEADZONE) {
-                pan_y += (left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
+                pan_y -= (left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
             }
 
             if (r3 && !prev_r3) {
@@ -580,9 +840,14 @@ int main(int argc, char *argv[]) {
         prev_a = a; prev_b = b; prev_plus = plus; prev_l = l; prev_r = r; prev_r3 = r3;
 
         if (state == APP_STATE_BROWSER) {
-            render_library(renderer, &fb);
+            if (fb_is_at_root(&fb)) {
+                render_library(renderer, &fb);
+            } else {
+                render_folder_detail(renderer, &fb);
+            }
         } else {
-            render_reader(renderer, page_tex, ar.current_page, ar.page_count, zoom, &pan_x, &pan_y);
+            int display_page = bar_dragging ? drag_target_page : ar.current_page;
+            render_reader(renderer, page_tex, display_page, ar.page_count, zoom, &pan_x, &pan_y);
         }
         SDL_RenderPresent(renderer);
     }
