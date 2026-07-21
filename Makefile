@@ -40,7 +40,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	$(notdir $(CURDIR))
 APP_TITLE       :=      Comic Reader
 APP_AUTHOR      :=      ZiggyGoofy
-APP_VERSION     :=      0.2.3
+APP_VERSION     :=      0.3.0
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data

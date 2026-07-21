@@ -11,6 +11,7 @@
 #include "archive.h"
 #include "progress.h"
 #include "thumbnail.h"
+#include "strings.h"
 
 #define SCREEN_W 1280
 #define SCREEN_H 720
@@ -92,6 +93,10 @@ static TTF_Font *g_font = NULL;       // police standard (listes, libellés)
 static TTF_Font *g_font_title = NULL; // police plus grande (titre de la sidebar)
 static PlFontData g_font_data;
 
+// Table de textes actuelle (français ou anglais), déterminée une fois au
+// démarrage selon la langue configurée sur la console.
+static const UIStrings *UI = NULL;
+
 static char g_entry_labels[FB_MAX_ENTRIES][40];
 static SDL_Texture *g_thumb_textures[FB_MAX_ENTRIES];
 static bool g_thumb_attempted[FB_MAX_ENTRIES];
@@ -162,10 +167,10 @@ static void refresh_entry_labels(const FileBrowser *fb) {
         if (!progress_load(full_path, &page, &total) || total <= 0) continue;
 
         if (page >= total - 1) {
-            snprintf(g_entry_labels[i], sizeof(g_entry_labels[i]), "Lu");
+            snprintf(g_entry_labels[i], sizeof(g_entry_labels[i]), "%s", UI->progress_done);
         } else {
             snprintf(g_entry_labels[i], sizeof(g_entry_labels[i]),
-                     "En cours (p. %d/%d)", page + 1, total);
+                     UI->progress_in_progress_fmt, page + 1, total);
         }
     }
 }
@@ -295,7 +300,7 @@ static void render_sidebar(SDL_Renderer *renderer) {
     int menu_y = 130;
     draw_rect(renderer, 0, menu_y - 8, SIDEBAR_W, 44, 40, 40, 58, 255);
     draw_rect(renderer, 0, menu_y - 8, 4, 44, 255, 210, 90, 255); // liseré d'accent à gauche
-    draw_text(renderer, "LIBRARY", 28, menu_y, accent);
+    draw_text(renderer, UI->menu_library, 28, menu_y, accent);
 }
 
 static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
@@ -313,8 +318,8 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
     int content_x = SIDEBAR_W + CONTENT_MARGIN;
 
     if (fb->entry_count == 0) {
-        draw_text(renderer, "Aucun fichier .cbz/.cbr ni dossier ici.", content_x, GRID_TOP, gray);
-        draw_text(renderer, "B: dossier parent   +: quitter", content_x, SCREEN_H - 34, gray);
+        draw_text(renderer, UI->no_files_msg, content_x, GRID_TOP, gray);
+        draw_text(renderer, UI->parent_quit_footer, content_x, SCREEN_H - 34, gray);
         return;
     }
 
@@ -366,7 +371,7 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
                        index == fb->selected ? accent : white);
 
             if (g_entry_labels[index][0] != '\0') {
-                bool is_done = (strcmp(g_entry_labels[index], "Lu") == 0);
+                bool is_done = (strcmp(g_entry_labels[index], UI->progress_done) == 0);
                 SDL_Color badge_color = is_done ? done_color : prog_color;
                 draw_text(renderer, g_entry_labels[index], tile_x,
                            tile_y + GRID_COVER_H + 8 + GRID_TITLE_H - 10, badge_color);
@@ -374,7 +379,7 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
         }
     }
 
-    draw_text(renderer, "A: ouvrir   B: dossier parent   Stick/D-pad: naviguer   +: quitter",
+    draw_text(renderer, UI->root_footer,
                content_x, SCREEN_H - 34, gray);
 }
 
@@ -398,8 +403,8 @@ static void render_folder_detail(SDL_Renderer *renderer, const FileBrowser *fb) 
     draw_text_ex(renderer, g_font_title, folder_name, DETAIL_MARGIN, 20, white);
 
     if (fb->entry_count == 0) {
-        draw_text(renderer, "Ce dossier est vide.", DETAIL_MARGIN, DETAIL_HEADER_H + 20, gray);
-        draw_text(renderer, "B: dossier parent   +: quitter", DETAIL_MARGIN, SCREEN_H - 34, gray);
+        draw_text(renderer, UI->detail_empty_msg, DETAIL_MARGIN, DETAIL_HEADER_H + 20, gray);
+        draw_text(renderer, UI->parent_quit_footer, DETAIL_MARGIN, SCREEN_H - 34, gray);
         return;
     }
 
@@ -447,7 +452,7 @@ static void render_folder_detail(SDL_Renderer *renderer, const FileBrowser *fb) 
         if (g_entry_labels[entry_index][0] != '\0') {
             int name_w = text_width(e->name);
             int progress_x = list_x + name_w + 24;
-            bool is_done = (strcmp(g_entry_labels[entry_index], "Lu") == 0);
+            bool is_done = (strcmp(g_entry_labels[entry_index], UI->progress_done) == 0);
             SDL_Color color = is_done ? done_color : prog_color;
 
             int label_w = text_width(g_entry_labels[entry_index]);
@@ -457,7 +462,7 @@ static void render_folder_detail(SDL_Renderer *renderer, const FileBrowser *fb) 
         }
     }
 
-    draw_text(renderer, "A: ouvrir   B: dossier parent   Haut/Bas: naviguer   +: quitter",
+    draw_text(renderer, UI->detail_footer,
                DETAIL_MARGIN, SCREEN_H - 34, gray);
 }
 
@@ -647,20 +652,18 @@ static void render_reader_bar(SDL_Renderer *renderer, int page_index, int page_c
     SDL_RenderFillRect(renderer, &overlay);
 
     char page_counter[32];
-    snprintf(page_counter, sizeof(page_counter), "Page %d / %d", page_index + 1, page_count);
+    snprintf(page_counter, sizeof(page_counter), UI->page_counter_fmt, page_index + 1, page_count);
     draw_text(renderer, page_counter, BAR_MARGIN, BAR_TOP_Y + 8, white);
 
     // Bouton de bascule de mode (tactile) — aussi accessible via la touche Y.
     draw_rect_outline(renderer, MODE_BUTTON_X, MODE_BUTTON_Y, MODE_BUTTON_W, MODE_BUTTON_H,
                        255, 210, 90, 255, 2);
-    const char *mode_label = (mode == READ_MODE_PAGE) ? "Mode: Page (Y)" : "Mode: Défilement (Y)";
+    const char *mode_label = (mode == READ_MODE_PAGE) ? UI->mode_label_page : UI->mode_label_strip;
     int mode_label_w = text_width(mode_label);
     draw_text(renderer, mode_label, MODE_BUTTON_X + (MODE_BUTTON_W - mode_label_w) / 2,
                MODE_BUTTON_Y + 5, accent);
 
-    const char *hint = (mode == READ_MODE_PAGE)
-        ? "L/R/swipe: page   Pincer/stick droit: zoom   B: retour"
-        : "Stick/doigt: défiler   B: retour";
+    const char *hint = (mode == READ_MODE_PAGE) ? UI->reader_hint_page : UI->reader_hint_strip;
     int hint_w = text_width(hint);
     draw_text(renderer, hint, SCREEN_W - BAR_MARGIN - hint_w, BAR_TOP_Y + 8, gray);
 
@@ -717,7 +720,7 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
         SDL_RenderCopy(renderer, tex, NULL, &dst);
     } else {
         SDL_Color gray = { 150, 150, 160, 255 };
-        draw_text(renderer, "Impossible de charger cette page.", 40, SCREEN_H / 2, gray);
+        draw_text(renderer, UI->reader_error_page, 40, SCREEN_H / 2, gray);
     }
 
     if (bar_visible) {
@@ -801,6 +804,8 @@ static void save_current_progress(const ComicArchive *ar) {
 
 int main(int argc, char *argv[]) {
     consoleDebugInit(debugDevice_SVC);
+
+    UI = get_ui_strings(detect_system_language());
 
     Result pl_rc = plInitialize(PlServiceType_User);
     if (R_FAILED(pl_rc)) {
