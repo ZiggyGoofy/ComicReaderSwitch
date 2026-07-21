@@ -31,6 +31,16 @@
 #define BAR_TRACK_H 8
 #define BAR_THUMB_R 12
 
+#define MODE_BUTTON_X (BAR_MARGIN + 200)
+#define MODE_BUTTON_Y (BAR_TOP_Y + 6)
+#define MODE_BUTTON_W 200
+#define MODE_BUTTON_H 28
+
+// --- Gestes tactiles en mode page : swipe horizontal (page suivante/précédente)
+// et pincer à deux doigts (zoom) ---
+#define SWIPE_THRESHOLD_PX 80
+#define PINCH_ZOOM_SCALE 0.006f
+
 // --- Barre latérale façon Noboru ---
 #define SIDEBAR_W 260
 
@@ -60,6 +70,24 @@ typedef enum {
     APP_STATE_READER
 } AppState;
 
+typedef enum {
+    READ_MODE_PAGE,  // une page à la fois (comportement actuel)
+    READ_MODE_STRIP  // toute l'archive comme un long défilement vertical continu
+} ReadMode;
+
+// Fenêtre de 5 pages chargées à la fois en mode défilement, asymétrique :
+// 1 page avant, la page actuelle, et 3 pages après — on lit presque toujours
+// vers l'avant, donc autant anticiper davantage dans ce sens.
+#define STRIP_BEFORE 1
+#define STRIP_AFTER 3
+#define STRIP_WINDOW (STRIP_BEFORE + 1 + STRIP_AFTER)
+#define STRIP_CENTER STRIP_BEFORE // index de la page "actuelle" dans le tableau
+typedef struct {
+    int page_index;      // -1 si le slot est vide
+    SDL_Texture *tex;
+    int draw_h;           // hauteur d'affichage à l'échelle largeur-écran
+} StripSlot;
+
 static TTF_Font *g_font = NULL;       // police standard (listes, libellés)
 static TTF_Font *g_font_title = NULL; // police plus grande (titre de la sidebar)
 static PlFontData g_font_data;
@@ -73,6 +101,10 @@ static bool g_thumb_attempted[FB_MAX_ENTRIES];
 // grille racine, qui reste utilisé uniquement à la racine du dossier comics.
 static SDL_Texture *g_hero_thumb = NULL;
 static int g_hero_thumb_index = -1;
+
+// Déclarée ici, définie plus bas dans le fichier — nécessaire car les
+// fonctions du mode défilement (plus haut dans le fichier) l'utilisent.
+static void save_current_progress(const ComicArchive *ar);
 
 static bool load_system_font(void) {
     Result rc = plGetSharedFontByType(&g_font_data, PlSharedFontType_Standard);
@@ -465,6 +497,130 @@ static void load_current_page(SDL_Renderer *renderer, ComicArchive *ar, SDL_Text
     *out_tex = decode_page_to_texture(renderer, data, size);
 }
 
+// --- Mode défilement continu (READ_MODE_STRIP) ---
+// Fenêtre glissante de 3 pages (précédente/actuelle/suivante), pour ne
+// jamais garder toute l'archive en mémoire vidéo à la fois.
+static StripSlot g_strip[STRIP_WINDOW];
+static float g_strip_scroll = 0.0f; // 0 = haut de la page "actuelle" (index STRIP_CENTER) aligné en haut d'écran
+
+static void strip_clear_slot(int i) {
+    if (g_strip[i].tex) {
+        SDL_DestroyTexture(g_strip[i].tex);
+        g_strip[i].tex = NULL;
+    }
+    g_strip[i].page_index = -1;
+    g_strip[i].draw_h = 0;
+}
+
+static void strip_clear_all(void) {
+    for (int i = 0; i < STRIP_WINDOW; i++) strip_clear_slot(i);
+    g_strip_scroll = 0.0f;
+}
+
+// Charge la page `page_index` dans le slot `slot_i` (ou vide le slot si
+// page_index est hors bornes, ex: pas de page précédente avant la 1re).
+static void strip_load_slot(SDL_Renderer *renderer, ComicArchive *ar, int slot_i, int page_index) {
+    strip_clear_slot(slot_i);
+    if (page_index < 0 || page_index >= ar->page_count) return;
+
+    void *data = NULL;
+    size_t size = 0;
+    if (!ar_extract_page(ar, page_index, &data, &size)) return;
+
+    SDL_Texture *tex = decode_page_to_texture(renderer, data, size);
+    if (!tex) return;
+
+    int tw, th;
+    SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
+    int draw_h = (th > 0 && tw > 0) ? (int)((float)th * ((float)SCREEN_W / (float)tw)) : SCREEN_H;
+
+    g_strip[slot_i].page_index = page_index;
+    g_strip[slot_i].tex = tex;
+    g_strip[slot_i].draw_h = draw_h;
+}
+
+// (Re)centre la fenêtre sur ar->current_page (index STRIP_CENTER) et remet
+// le défilement à zéro. À appeler à l'entrée en mode défilement, ou après un
+// saut direct de page (L/R, barre tactile).
+static void strip_reset(SDL_Renderer *renderer, ComicArchive *ar) {
+    for (int i = 0; i < STRIP_WINDOW; i++) {
+        strip_load_slot(renderer, ar, i, ar->current_page + (i - STRIP_CENTER));
+    }
+    g_strip_scroll = 0.0f;
+}
+
+// Décale toute la fenêtre d'une page vers l'avant (défilé assez bas pour
+// dépasser la page "actuelle"). Fonctionne quelle que soit la taille de la
+// fenêtre : on décale chaque slot d'une position vers le début du tableau.
+static void strip_shift_forward(SDL_Renderer *renderer, ComicArchive *ar) {
+    if (g_strip[STRIP_CENTER + 1].page_index < 0) return; // rien après : rien à décaler
+
+    int old_center_h = g_strip[STRIP_CENTER].draw_h;
+
+    strip_clear_slot(0);
+    for (int i = 0; i < STRIP_WINDOW - 1; i++) {
+        g_strip[i] = g_strip[i + 1];
+    }
+    g_strip[STRIP_WINDOW - 1].tex = NULL;
+    g_strip[STRIP_WINDOW - 1].page_index = -1;
+    g_strip[STRIP_WINDOW - 1].draw_h = 0;
+
+    ar->current_page = g_strip[STRIP_CENTER].page_index;
+    strip_load_slot(renderer, ar, STRIP_WINDOW - 1, ar->current_page + (STRIP_WINDOW - 1 - STRIP_CENTER));
+
+    g_strip_scroll -= old_center_h;
+    save_current_progress(ar);
+}
+
+// Décale toute la fenêtre d'une page vers l'arrière (défilement remonté
+// au-delà de la page juste avant l'actuelle).
+static void strip_shift_backward(SDL_Renderer *renderer, ComicArchive *ar) {
+    if (g_strip[STRIP_CENTER - 1].page_index < 0) return; // rien avant : rien à décaler
+
+    int old_before_center_h = g_strip[STRIP_CENTER - 1].draw_h;
+
+    strip_clear_slot(STRIP_WINDOW - 1);
+    for (int i = STRIP_WINDOW - 1; i > 0; i--) {
+        g_strip[i] = g_strip[i - 1];
+    }
+    g_strip[0].tex = NULL;
+    g_strip[0].page_index = -1;
+    g_strip[0].draw_h = 0;
+
+    ar->current_page = g_strip[STRIP_CENTER].page_index;
+    strip_load_slot(renderer, ar, 0, ar->current_page - STRIP_CENTER);
+
+    g_strip_scroll += old_before_center_h;
+    save_current_progress(ar);
+}
+
+// Applique un défilement (delta en pixels, positif = vers le bas / contenu
+// plus récent) et décale la fenêtre de pages si besoin pour rester cohérent.
+static void strip_apply_scroll(SDL_Renderer *renderer, ComicArchive *ar, float delta) {
+    g_strip_scroll += delta;
+
+    // Clamp en haut de la toute première page (pas de contenu avant).
+    if (g_strip[STRIP_CENTER - 1].page_index < 0 && g_strip_scroll < 0.0f) {
+        g_strip_scroll = 0.0f;
+    }
+    // Clamp en bas de la toute dernière page (pas de contenu après), pour ne
+    // pas défiler dans le vide au-delà de la fin de l'archive.
+    if (g_strip[STRIP_CENTER + 1].page_index < 0) {
+        float max_scroll = (float)g_strip[STRIP_CENTER].draw_h - (float)SCREEN_H;
+        if (max_scroll < 0.0f) max_scroll = 0.0f;
+        if (g_strip_scroll > max_scroll) g_strip_scroll = max_scroll;
+    }
+
+    // Décalage de fenêtre si on a défilé assez pour dépasser la page actuelle.
+    while (g_strip_scroll >= (float)g_strip[STRIP_CENTER].draw_h && g_strip[STRIP_CENTER + 1].page_index >= 0) {
+        strip_shift_forward(renderer, ar);
+    }
+    while (g_strip_scroll < 0.0f && g_strip[STRIP_CENTER - 1].page_index >= 0) {
+        strip_shift_backward(renderer, ar);
+    }
+    if (g_strip_scroll < 0.0f) g_strip_scroll = 0.0f; // sécurité si pas de page précédente
+}
+
 static float min_zoom_for_texture(SDL_Texture *tex) {
     if (!tex) return ZOOM_MIN;
     int tw, th;
@@ -479,8 +635,56 @@ static float min_zoom_for_texture(SDL_Texture *tex) {
     return fit_scale / cover_scale;
 }
 
+// Bande du bas partagée entre les deux modes de lecture : compteur de page,
+// bouton de bascule de mode, indications de contrôles, et barre tactile.
+static void render_reader_bar(SDL_Renderer *renderer, int page_index, int page_count, ReadMode mode) {
+    SDL_Color gray = { 150, 150, 160, 255 };
+    SDL_Color accent = { 255, 210, 90, 255 };
+    SDL_Color white = { 235, 235, 235, 255 };
+
+    SDL_SetRenderDrawColor(renderer, 10, 10, 14, 190);
+    SDL_Rect overlay = { 0, BAR_TOP_Y, SCREEN_W, BAR_OVERLAY_H };
+    SDL_RenderFillRect(renderer, &overlay);
+
+    char page_counter[32];
+    snprintf(page_counter, sizeof(page_counter), "Page %d / %d", page_index + 1, page_count);
+    draw_text(renderer, page_counter, BAR_MARGIN, BAR_TOP_Y + 8, white);
+
+    // Bouton de bascule de mode (tactile) — aussi accessible via la touche Y.
+    draw_rect_outline(renderer, MODE_BUTTON_X, MODE_BUTTON_Y, MODE_BUTTON_W, MODE_BUTTON_H,
+                       255, 210, 90, 255, 2);
+    const char *mode_label = (mode == READ_MODE_PAGE) ? "Mode: Page (Y)" : "Mode: Défilement (Y)";
+    int mode_label_w = text_width(mode_label);
+    draw_text(renderer, mode_label, MODE_BUTTON_X + (MODE_BUTTON_W - mode_label_w) / 2,
+               MODE_BUTTON_Y + 5, accent);
+
+    const char *hint = (mode == READ_MODE_PAGE)
+        ? "L/R/swipe: page   Pincer/stick droit: zoom   B: retour"
+        : "Stick/doigt: défiler   B: retour";
+    int hint_w = text_width(hint);
+    draw_text(renderer, hint, SCREEN_W - BAR_MARGIN - hint_w, BAR_TOP_Y + 8, gray);
+
+    int track_left = BAR_MARGIN;
+    int track_right = SCREEN_W - BAR_MARGIN;
+    SDL_SetRenderDrawColor(renderer, 70, 70, 85, 255);
+    SDL_Rect track = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, track_right - track_left, BAR_TRACK_H };
+    SDL_RenderFillRect(renderer, &track);
+
+    float progress_fraction = (page_count > 1) ? (float)page_index / (float)(page_count - 1) : 0.0f;
+    int filled_w = (int)((track_right - track_left) * progress_fraction);
+    SDL_SetRenderDrawColor(renderer, 255, 210, 90, 255);
+    SDL_Rect filled = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, filled_w, BAR_TRACK_H };
+    SDL_RenderFillRect(renderer, &filled);
+
+    int thumb_x = track_left + filled_w;
+    SDL_SetRenderDrawColor(renderer, 255, 230, 150, 255);
+    SDL_Rect thumb = { thumb_x - BAR_THUMB_R, BAR_TRACK_Y - BAR_THUMB_R,
+                       BAR_THUMB_R * 2, BAR_THUMB_R * 2 };
+    SDL_RenderFillRect(renderer, &thumb);
+}
+
 static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_index,
-                           int page_count, float zoom, float *pan_x, float *pan_y) {
+                           int page_count, float zoom, float *pan_x, float *pan_y, bool bar_visible) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
@@ -516,44 +720,53 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
         draw_text(renderer, "Impossible de charger cette page.", 40, SCREEN_H / 2, gray);
     }
 
-    SDL_Color gray = { 150, 150, 160, 255 };
-    SDL_Color accent = { 255, 210, 90, 255 };
-    SDL_Color white = { 235, 235, 235, 255 };
+    if (bar_visible) {
+        render_reader_bar(renderer, page_index, page_count, READ_MODE_PAGE);
+    }
+}
 
-    // Bande semi-transparente en bas de l'écran, contenant le compteur de
-    // page et la barre de suivi tactile.
-    SDL_SetRenderDrawColor(renderer, 10, 10, 14, 190);
-    SDL_Rect overlay = { 0, BAR_TOP_Y, SCREEN_W, BAR_OVERLAY_H };
-    SDL_RenderFillRect(renderer, &overlay);
+// Rendu du mode défilement continu : empile les 3 pages chargées (slots
+// précédente/actuelle/suivante) verticalement, décalées par g_strip_scroll,
+// toutes mises à l'échelle de la largeur de l'écran.
+static void render_reader_strip(SDL_Renderer *renderer, int page_count, bool bar_visible,
+                                 float zoom, float *pan_x) {
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
 
-    char page_counter[32];
-    snprintf(page_counter, sizeof(page_counter), "Page %d / %d", page_index + 1, page_count);
-    draw_text(renderer, page_counter, BAR_MARGIN, BAR_TOP_Y + 8, white);
+    // Toutes les hauteurs/positions sont calculées en unités "de base" (zoom
+    // 1x, largeur = SCREEN_W), puis mises à l'échelle par `zoom` seulement au
+    // moment du dessin — ça évite de complexifier la logique de défilement
+    // et de décalage de fenêtre, qui reste inchangée.
+    int draw_w = (int)(SCREEN_W * zoom);
+    float max_pan_x = (draw_w > SCREEN_W) ? (draw_w - SCREEN_W) / 2.0f : 0.0f;
+    if (*pan_x > max_pan_x) *pan_x = max_pan_x;
+    if (*pan_x < -max_pan_x) *pan_x = -max_pan_x;
+    int x_pos = (SCREEN_W - draw_w) / 2 + (int)*pan_x;
 
-    const char *hint = "L/R ou barre tactile: page   Stick droit: zoom   B: retour";
-    int hint_w = text_width(hint);
-    draw_text(renderer, hint, SCREEN_W - BAR_MARGIN - hint_w, BAR_TOP_Y + 8, gray);
+    float y_cursor = -g_strip_scroll * zoom;
+    for (int i = 0; i < STRIP_CENTER; i++) {
+        if (g_strip[i].page_index >= 0) {
+            y_cursor -= (float)g_strip[i].draw_h * zoom;
+        }
+    }
 
-    // Piste de la barre de progression.
-    int track_left = BAR_MARGIN;
-    int track_right = SCREEN_W - BAR_MARGIN;
-    SDL_SetRenderDrawColor(renderer, 70, 70, 85, 255);
-    SDL_Rect track = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, track_right - track_left, BAR_TRACK_H };
-    SDL_RenderFillRect(renderer, &track);
+    for (int i = 0; i < STRIP_WINDOW; i++) {
+        if (g_strip[i].page_index < 0 || !g_strip[i].tex) continue;
 
-    // Portion remplie jusqu'à la page courante.
-    float progress_fraction = (page_count > 1) ? (float)page_index / (float)(page_count - 1) : 0.0f;
-    int filled_w = (int)((track_right - track_left) * progress_fraction);
-    SDL_SetRenderDrawColor(renderer, 255, 210, 90, 255);
-    SDL_Rect filled = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, filled_w, BAR_TRACK_H };
-    SDL_RenderFillRect(renderer, &filled);
+        int slot_draw_h = (int)((float)g_strip[i].draw_h * zoom);
+        SDL_Rect dst = { x_pos, (int)y_cursor, draw_w, slot_draw_h };
+        // On ne dessine que si la page est au moins partiellement visible,
+        // pour éviter des appels de rendu inutiles.
+        if (dst.y + dst.h > 0 && dst.y < SCREEN_H) {
+            SDL_RenderCopy(renderer, g_strip[i].tex, NULL, &dst);
+        }
+        y_cursor += (float)slot_draw_h;
+    }
 
-    // Curseur (cercle simple approximé par un petit carré arrondi visuellement suffisant).
-    int thumb_x = track_left + filled_w;
-    SDL_SetRenderDrawColor(renderer, 255, 230, 150, 255);
-    SDL_Rect thumb = { thumb_x - BAR_THUMB_R, BAR_TRACK_Y - BAR_THUMB_R,
-                       BAR_THUMB_R * 2, BAR_THUMB_R * 2 };
-    SDL_RenderFillRect(renderer, &thumb);
+    int current_page = g_strip[STRIP_CENTER].page_index >= 0 ? g_strip[STRIP_CENTER].page_index : 0;
+    if (bar_visible) {
+        render_reader_bar(renderer, current_page, page_count, READ_MODE_STRIP);
+    }
 }
 
 // Convertit une position X (en pixels écran) sur la barre de progression en
@@ -572,6 +785,12 @@ static int page_from_bar_x(int x, int page_count) {
     if (target < 0) target = 0;
     if (target >= page_count) target = page_count - 1;
     return target;
+}
+
+static float touch_distance(int x1, int y1, int x2, int y2) {
+    float dx = (float)(x2 - x1);
+    float dy = (float)(y2 - y1);
+    return SDL_sqrtf(dx * dx + dy * dy);
 }
 
 static void save_current_progress(const ComicArchive *ar) {
@@ -631,14 +850,33 @@ int main(int argc, char *argv[]) {
     float pan_x = 0.0f, pan_y = 0.0f;
 
     AppState state = APP_STATE_BROWSER;
+    ReadMode read_mode = READ_MODE_PAGE;
     bool running = true;
     bool prev_up = false, prev_down = false, prev_left = false, prev_right = false,
          prev_a = false, prev_b = false, prev_plus = false, prev_l = false,
-         prev_r = false, prev_r3 = false;
+         prev_r = false, prev_r3 = false, prev_y_btn = false, prev_x_btn = false;
 
-    // Suivi du glissement tactile/souris sur la barre de progression (lecture uniquement).
+    // Visibilité de la barre du bas : bouton X (bascule) ou tout contact
+    // avec l'écran (masque, sans la ré-afficher automatiquement).
+    bool bar_visible = true;
+
+    // Suivi du glissement tactile/souris (barre de progression en mode page,
+    // défilement de l'image en mode strip).
     bool bar_dragging = false;
     int drag_target_page = 0;
+    bool strip_touch_dragging = false;
+    int strip_last_touch_y = 0;
+
+    // Suivi du swipe (1 doigt) et du pincer-zoomer (2 doigts) en mode page.
+    SDL_FingerID swipe_finger_id = -1;
+    int swipe_start_x = 0, swipe_start_y = 0;
+    int swipe_last_x = 0, swipe_last_y = 0;
+    bool swipe_active = false;
+
+    SDL_FingerID pinch_finger2_id = -1;
+    int pinch_x1 = 0, pinch_y1 = 0, pinch_x2 = 0, pinch_y2 = 0;
+    float pinch_last_distance = 0.0f;
+    bool pinching = false;
 
     while (running) {
         SDL_Event event;
@@ -651,42 +889,158 @@ int main(int argc, char *argv[]) {
             if (state == APP_STATE_READER) {
                 int touch_x = -1, touch_y = -1;
                 bool is_down = false, is_move = false, is_up = false;
+                SDL_FingerID finger_id = -1; // -100 = pseudo-doigt souris (pas de 2 doigts possible)
 
                 if (event.type == SDL_FINGERDOWN) {
                     touch_x = (int)(event.tfinger.x * SCREEN_W);
                     touch_y = (int)(event.tfinger.y * SCREEN_H);
                     is_down = true;
+                    finger_id = event.tfinger.fingerId;
                 } else if (event.type == SDL_FINGERMOTION) {
                     touch_x = (int)(event.tfinger.x * SCREEN_W);
                     touch_y = (int)(event.tfinger.y * SCREEN_H);
                     is_move = true;
+                    finger_id = event.tfinger.fingerId;
                 } else if (event.type == SDL_FINGERUP) {
                     is_up = true;
+                    finger_id = event.tfinger.fingerId;
                 } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
                     touch_x = event.button.x;
                     touch_y = event.button.y;
                     is_down = true;
+                    finger_id = -100;
                 } else if (event.type == SDL_MOUSEMOTION) {
                     touch_x = event.motion.x;
                     touch_y = event.motion.y;
                     is_move = true;
+                    finger_id = -100;
                 } else if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
                     is_up = true;
+                    finger_id = -100;
                 }
 
-                if (is_down && touch_y >= BAR_TOP_Y && ar.page_count > 0) {
-                    bar_dragging = true;
-                    drag_target_page = page_from_bar_x(touch_x, ar.page_count);
-                } else if (is_move && bar_dragging && ar.page_count > 0) {
-                    drag_target_page = page_from_bar_x(touch_x, ar.page_count);
-                } else if (is_up && bar_dragging) {
-                    bar_dragging = false;
-                    if (drag_target_page != ar.current_page) {
-                        ar.current_page = drag_target_page;
+                bool was_bar_visible = bar_visible;
+                bool hit_mode_button = was_bar_visible && is_down
+                                     && touch_x >= MODE_BUTTON_X && touch_x <= MODE_BUTTON_X + MODE_BUTTON_W
+                                     && touch_y >= MODE_BUTTON_Y && touch_y <= MODE_BUTTON_Y + MODE_BUTTON_H;
+
+                // Tout contact avec l'écran masque la barre (elle ne se
+                // réaffiche qu'avec la touche X) — sauf si on vient
+                // justement de toucher le bouton de mode, pour ne pas la
+                // masquer au moment même où on interagit avec elle.
+                if (is_down && !hit_mode_button) {
+                    bar_visible = false;
+                }
+
+                if (hit_mode_button) {
+                    if (read_mode == READ_MODE_PAGE) {
+                        read_mode = READ_MODE_STRIP;
+                        zoom = ZOOM_MIN;
+                        pan_x = 0.0f;
+                        strip_reset(renderer, &ar);
+                    } else {
+                        read_mode = READ_MODE_PAGE;
                         zoom = ZOOM_MIN;
                         pan_x = 0.0f;
                         pan_y = 0.0f;
                         load_current_page(renderer, &ar, &page_tex);
+                    }
+                } else if (read_mode == READ_MODE_PAGE) {
+                    if (is_down && was_bar_visible && touch_y >= BAR_TOP_Y && ar.page_count > 0) {
+                        // Toucher la barre : saut direct de page (comportement existant).
+                        bar_dragging = true;
+                        drag_target_page = page_from_bar_x(touch_x, ar.page_count);
+                    } else if (is_move && bar_dragging && ar.page_count > 0) {
+                        drag_target_page = page_from_bar_x(touch_x, ar.page_count);
+                    } else if (is_up && bar_dragging) {
+                        bar_dragging = false;
+                        if (drag_target_page != ar.current_page) {
+                            ar.current_page = drag_target_page;
+                            zoom = ZOOM_MIN;
+                            pan_x = 0.0f;
+                            pan_y = 0.0f;
+                            load_current_page(renderer, &ar, &page_tex);
+                            save_current_progress(&ar);
+                        }
+                    } else if (is_down && touch_y < BAR_TOP_Y) {
+                        // Toucher l'image (pas la barre) : swipe (1 doigt) ou pincer (2 doigts).
+                        if (swipe_finger_id == -1 && pinch_finger2_id == -1) {
+                            // Premier doigt posé : point de départ potentiel d'un swipe.
+                            swipe_finger_id = finger_id;
+                            swipe_start_x = touch_x;
+                            swipe_start_y = touch_y;
+                            swipe_last_x = touch_x;
+                            swipe_last_y = touch_y;
+                            swipe_active = true;
+                        } else if (swipe_finger_id != -1 && finger_id != swipe_finger_id && pinch_finger2_id == -1) {
+                            // Deuxième doigt posé : ça devient un pincer, plus un swipe.
+                            pinch_finger2_id = finger_id;
+                            pinch_x1 = swipe_last_x;
+                            pinch_y1 = swipe_last_y;
+                            pinch_x2 = touch_x;
+                            pinch_y2 = touch_y;
+                            pinch_last_distance = touch_distance(pinch_x1, pinch_y1, pinch_x2, pinch_y2);
+                            pinching = true;
+                            swipe_active = false; // annule le swipe, on est en train de pincer
+                        }
+                    } else if (is_move) {
+                        if (pinching && finger_id == swipe_finger_id) {
+                            pinch_x1 = touch_x; pinch_y1 = touch_y;
+                        } else if (pinching && finger_id == pinch_finger2_id) {
+                            pinch_x2 = touch_x; pinch_y2 = touch_y;
+                        } else if (swipe_active && finger_id == swipe_finger_id) {
+                            swipe_last_x = touch_x;
+                            swipe_last_y = touch_y;
+                        }
+
+                        if (pinching) {
+                            float current_distance = touch_distance(pinch_x1, pinch_y1, pinch_x2, pinch_y2);
+                            float delta = current_distance - pinch_last_distance;
+                            zoom += delta * PINCH_ZOOM_SCALE;
+                            float min_zoom = min_zoom_for_texture(page_tex);
+                            if (zoom < min_zoom) zoom = min_zoom;
+                            if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
+                            pinch_last_distance = current_distance;
+                        }
+                    } else if (is_up) {
+                        if (pinching && (finger_id == swipe_finger_id || finger_id == pinch_finger2_id)) {
+                            // Un des deux doigts du pincer est levé : fin du geste.
+                            pinching = false;
+                            swipe_finger_id = -1;
+                            pinch_finger2_id = -1;
+                            swipe_active = false;
+                        } else if (swipe_active && finger_id == swipe_finger_id) {
+                            // Fin d'un swipe à 1 doigt : on regarde si le geste est
+                            // assez ample et surtout horizontal pour tourner la page.
+                            int delta_x = swipe_last_x - swipe_start_x;
+                            int delta_y = swipe_last_y - swipe_start_y;
+                            if (abs(delta_x) > SWIPE_THRESHOLD_PX && abs(delta_x) > abs(delta_y)) {
+                                if (delta_x < 0 && ar.current_page < ar.page_count - 1) {
+                                    ar_next_page(&ar);
+                                    zoom = ZOOM_MIN; pan_x = 0.0f; pan_y = 0.0f;
+                                    load_current_page(renderer, &ar, &page_tex);
+                                    save_current_progress(&ar);
+                                } else if (delta_x > 0 && ar.current_page > 0) {
+                                    ar_prev_page(&ar);
+                                    zoom = ZOOM_MIN; pan_x = 0.0f; pan_y = 0.0f;
+                                    load_current_page(renderer, &ar, &page_tex);
+                                    save_current_progress(&ar);
+                                }
+                            }
+                            swipe_finger_id = -1;
+                            swipe_active = false;
+                        }
+                    }
+                } else { // READ_MODE_STRIP : glisser n'importe où sur l'écran pour défiler
+                    if (is_down) {
+                        strip_touch_dragging = true;
+                        strip_last_touch_y = touch_y;
+                    } else if (is_move && strip_touch_dragging) {
+                        int delta = strip_last_touch_y - touch_y; // doigt vers le haut = défile vers le bas
+                        strip_apply_scroll(renderer, &ar, (float)delta);
+                        strip_last_touch_y = touch_y;
+                    } else if (is_up && strip_touch_dragging) {
+                        strip_touch_dragging = false;
                         save_current_progress(&ar);
                     }
                 }
@@ -694,7 +1048,7 @@ int main(int argc, char *argv[]) {
         }
 
         bool up = false, down = false, left = false, right = false;
-        bool a = false, b = false, plus = false, l = false, r = false, r3 = false;
+        bool a = false, b = false, plus = false, l = false, r = false, r3 = false, y_btn = false, x_btn = false;
         int right_y = 0, left_x = 0, left_y = 0;
         if (pad) {
             up    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP)
@@ -711,6 +1065,11 @@ int main(int argc, char *argv[]) {
             l    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
             r    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
             r3   = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+            // Note : même inversion que pour A/B (voir plus haut) — le bouton
+            // physique Y sur Switch correspond à SDL_CONTROLLER_BUTTON_X.
+            y_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X);
+            // Et le bouton physique X correspond à SDL_CONTROLLER_BUTTON_Y.
+            x_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y);
 
             right_y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
             left_x  = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
@@ -755,6 +1114,13 @@ int main(int argc, char *argv[]) {
                             zoom = ZOOM_MIN;
                             pan_x = 0.0f;
                             pan_y = 0.0f;
+                            read_mode = READ_MODE_PAGE;
+                            strip_clear_all();
+                            bar_visible = true;
+                            swipe_finger_id = -1;
+                            swipe_active = false;
+                            pinch_finger2_id = -1;
+                            pinching = false;
 
                             int saved_page, saved_total;
                             if (progress_load(ar.archive_path, &saved_page, &saved_total)
@@ -777,44 +1143,107 @@ int main(int argc, char *argv[]) {
             }
 
         } else { // APP_STATE_READER
-            if (abs(right_y) > STICK_DEADZONE) {
-                float normalized = -right_y / 32768.0f;
-                zoom += normalized * ZOOM_SPEED_PER_FRAME;
-                float min_zoom = min_zoom_for_texture(page_tex);
-                if (zoom < min_zoom) zoom = min_zoom;
-                if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
-            }
-
-            if (abs(left_x) > STICK_DEADZONE) {
-                pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
-            }
-            if (abs(left_y) > STICK_DEADZONE) {
-                pan_y -= (left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
-            }
-
-            if (r3 && !prev_r3) {
-                zoom = ZOOM_MIN;
-                pan_x = 0.0f;
-                pan_y = 0.0f;
-            }
-
-            if (r && !prev_r) {
-                if (ar.current_page < ar.page_count - 1) {
-                    ar_next_page(&ar);
+            // Bascule de mode (touche Y). En entrant en mode défilement, on
+            // centre la fenêtre de 3 pages sur la page actuelle. En sortant,
+            // on s'assure que page_tex correspond bien à ar.current_page
+            // (qui a pu changer via le défilement).
+            if (y_btn && !prev_y_btn) {
+                if (read_mode == READ_MODE_PAGE) {
+                    read_mode = READ_MODE_STRIP;
+                    zoom = ZOOM_MIN;
+                    pan_x = 0.0f;
+                    strip_reset(renderer, &ar);
+                } else {
+                    read_mode = READ_MODE_PAGE;
                     zoom = ZOOM_MIN;
                     pan_x = 0.0f;
                     pan_y = 0.0f;
                     load_current_page(renderer, &ar, &page_tex);
-                    save_current_progress(&ar);
                 }
             }
-            if (l && !prev_l) {
-                if (ar.current_page > 0) {
-                    ar_prev_page(&ar);
+
+            // Bascule de visibilité de la barre (touche X).
+            if (x_btn && !prev_x_btn) {
+                bar_visible = !bar_visible;
+            }
+
+            if (read_mode == READ_MODE_PAGE) {
+                if (abs(right_y) > STICK_DEADZONE) {
+                    float normalized = -right_y / 32768.0f;
+                    zoom += normalized * ZOOM_SPEED_PER_FRAME;
+                    float min_zoom = min_zoom_for_texture(page_tex);
+                    if (zoom < min_zoom) zoom = min_zoom;
+                    if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
+                }
+
+                if (abs(left_x) > STICK_DEADZONE) {
+                    pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
+                }
+                if (abs(left_y) > STICK_DEADZONE) {
+                    pan_y -= (left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
+                }
+
+                if (r3 && !prev_r3) {
                     zoom = ZOOM_MIN;
                     pan_x = 0.0f;
                     pan_y = 0.0f;
-                    load_current_page(renderer, &ar, &page_tex);
+                }
+
+                if (r && !prev_r) {
+                    if (ar.current_page < ar.page_count - 1) {
+                        ar_next_page(&ar);
+                        zoom = ZOOM_MIN;
+                        pan_x = 0.0f;
+                        pan_y = 0.0f;
+                        load_current_page(renderer, &ar, &page_tex);
+                        save_current_progress(&ar);
+                    }
+                }
+                if (l && !prev_l) {
+                    if (ar.current_page > 0) {
+                        ar_prev_page(&ar);
+                        zoom = ZOOM_MIN;
+                        pan_x = 0.0f;
+                        pan_y = 0.0f;
+                        load_current_page(renderer, &ar, &page_tex);
+                        save_current_progress(&ar);
+                    }
+                }
+            } else { // READ_MODE_STRIP
+                // Zoom (stick droit), bornes plus simples qu'en mode page :
+                // pas de notion de "voir la page entière" ici, juste 1x à 4x.
+                if (abs(right_y) > STICK_DEADZONE) {
+                    float normalized = -right_y / 32768.0f;
+                    zoom += normalized * ZOOM_SPEED_PER_FRAME;
+                    if (zoom < ZOOM_MIN) zoom = ZOOM_MIN;
+                    if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
+                }
+
+                // Défilement vertical (stick gauche, axe Y).
+                if (abs(left_y) > STICK_DEADZONE) {
+                    strip_apply_scroll(renderer, &ar, (left_y / 32768.0f) * PAN_SPEED_PER_FRAME);
+                    save_current_progress(&ar);
+                }
+
+                // Déplacement horizontal (stick gauche, axe X), utile une
+                // fois zoomé puisque l'image dépasse alors la largeur d'écran.
+                if (zoom > ZOOM_MIN && abs(left_x) > STICK_DEADZONE) {
+                    pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
+                }
+
+                if (r3 && !prev_r3) {
+                    zoom = ZOOM_MIN;
+                    pan_x = 0.0f;
+                }
+
+                // L/R : saut d'un écran complet vers le haut/bas, pratique
+                // pour avancer plus vite sans defiler en continu.
+                if (r && !prev_r) {
+                    strip_apply_scroll(renderer, &ar, (float)SCREEN_H);
+                    save_current_progress(&ar);
+                }
+                if (l && !prev_l) {
+                    strip_apply_scroll(renderer, &ar, -(float)SCREEN_H);
                     save_current_progress(&ar);
                 }
             }
@@ -825,6 +1254,7 @@ int main(int argc, char *argv[]) {
                     SDL_DestroyTexture(page_tex);
                     page_tex = NULL;
                 }
+                strip_clear_all();
                 ar_close(&ar);
                 state = APP_STATE_BROWSER;
                 refresh_entry_labels(&fb);
@@ -838,6 +1268,8 @@ int main(int argc, char *argv[]) {
 
         prev_up = up; prev_down = down; prev_left = left; prev_right = right;
         prev_a = a; prev_b = b; prev_plus = plus; prev_l = l; prev_r = r; prev_r3 = r3;
+        prev_y_btn = y_btn;
+        prev_x_btn = x_btn;
 
         if (state == APP_STATE_BROWSER) {
             if (fb_is_at_root(&fb)) {
@@ -846,13 +1278,18 @@ int main(int argc, char *argv[]) {
                 render_folder_detail(renderer, &fb);
             }
         } else {
-            int display_page = bar_dragging ? drag_target_page : ar.current_page;
-            render_reader(renderer, page_tex, display_page, ar.page_count, zoom, &pan_x, &pan_y);
+            if (read_mode == READ_MODE_PAGE) {
+                int display_page = bar_dragging ? drag_target_page : ar.current_page;
+                render_reader(renderer, page_tex, display_page, ar.page_count, zoom, &pan_x, &pan_y, bar_visible);
+            } else {
+                render_reader_strip(renderer, ar.page_count, bar_visible, zoom, &pan_x);
+            }
         }
         SDL_RenderPresent(renderer);
     }
 
     if (page_tex) SDL_DestroyTexture(page_tex);
+    strip_clear_all();
     clear_thumbnail_cache();
     if (pad) SDL_GameControllerClose(pad);
     if (g_font) TTF_CloseFont(g_font);
