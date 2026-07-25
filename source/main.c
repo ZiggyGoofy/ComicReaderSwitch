@@ -19,21 +19,29 @@
 
 #define ZOOM_MIN 1.0f
 #define ZOOM_MAX 4.0f
+// En mode défilement, dézoomer en dessous de 1x a du sens (voir plus de
+// contenu à la fois), contrairement au mode page où 1x est déjà la limite
+// "page entière visible" calculée dynamiquement.
+#define STRIP_ZOOM_MIN 0.3f
 #define ZOOM_SPEED_PER_FRAME 0.02f
 #define PAN_SPEED_PER_FRAME 14.0f
 #define STICK_DEADZONE 8000
 
 #define BAR_MARGIN 40
 #define BAR_OVERLAY_H 74
-#define BAR_TOP_Y (SCREEN_H - BAR_OVERLAY_H)
-#define BAR_TRACK_Y (SCREEN_H - 28)
+#define BAR_TOP_Y(rh) ((rh) - BAR_OVERLAY_H)
+#define BAR_TRACK_Y(rh) ((rh) - 28)
 #define BAR_TRACK_H 8
 #define BAR_THUMB_R 12
 
 #define MODE_BUTTON_X (BAR_MARGIN + 200)
-#define MODE_BUTTON_Y (BAR_TOP_Y + 6)
+#define MODE_BUTTON_Y(rh) (BAR_TOP_Y(rh) + 6)
 #define MODE_BUTTON_W 200
 #define MODE_BUTTON_H 28
+
+// --- Canevas portrait utilisé quand la lecture est tournée à 90° ---
+#define CANVAS_W SCREEN_H  // 720 : largeur du canevas portrait
+#define CANVAS_H SCREEN_W  // 1280 : hauteur du canevas portrait
 
 #define SWIPE_THRESHOLD_PX 80
 #define PINCH_ZOOM_SCALE 0.006f
@@ -484,6 +492,11 @@ static void strip_clear_slot(int i) {
     g_strip[i].draw_h = 0;
 }
 
+// Largeur de référence utilisée pour mettre les pages à l'échelle en mode
+// défilement — correspond à la largeur d'affichage actuelle (paysage ou
+// portrait tourné), mise à jour à chaque appel de strip_reset.
+static int g_strip_render_w = SCREEN_W;
+
 static void strip_clear_all(void) {
     for (int i = 0; i < STRIP_WINDOW; i++) strip_clear_slot(i);
     g_strip_scroll = 0.0f;
@@ -502,14 +515,15 @@ static void strip_load_slot(SDL_Renderer *renderer, ComicArchive *ar, int slot_i
 
     int tw, th;
     SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
-    int draw_h = (th > 0 && tw > 0) ? (int)((float)th * ((float)SCREEN_W / (float)tw)) : SCREEN_H;
+    int draw_h = (th > 0 && tw > 0) ? (int)((float)th * ((float)g_strip_render_w / (float)tw)) : SCREEN_H;
 
     g_strip[slot_i].page_index = page_index;
     g_strip[slot_i].tex = tex;
     g_strip[slot_i].draw_h = draw_h;
 }
 
-static void strip_reset(SDL_Renderer *renderer, ComicArchive *ar) {
+static void strip_reset(SDL_Renderer *renderer, ComicArchive *ar, int render_w) {
+    g_strip_render_w = render_w;
     for (int i = 0; i < STRIP_WINDOW; i++) {
         strip_load_slot(renderer, ar, i, ar->current_page + (i - STRIP_CENTER));
     }
@@ -577,62 +591,68 @@ static void strip_apply_scroll(SDL_Renderer *renderer, ComicArchive *ar, float d
     if (g_strip_scroll < 0.0f) g_strip_scroll = 0.0f;
 }
 
-static float min_zoom_for_texture(SDL_Texture *tex) {
+static float min_zoom_for_texture(SDL_Texture *tex, int rw, int rh) {
     if (!tex) return ZOOM_MIN;
     int tw, th;
     SDL_QueryTexture(tex, NULL, NULL, &tw, &th);
     if (tw <= 0 || th <= 0) return ZOOM_MIN;
 
-    float cover_scale = (float)SCREEN_H / th;
-    float fit_scale = SDL_min((float)SCREEN_W / tw, (float)SCREEN_H / th);
+    float cover_scale = (float)rh / th;
+    float fit_scale = SDL_min((float)rw / tw, (float)rh / th);
     return fit_scale / cover_scale;
 }
 
-static void render_reader_bar(SDL_Renderer *renderer, int page_index, int page_count, ReadMode mode) {
+static void render_reader_bar(SDL_Renderer *renderer, int page_index, int page_count, ReadMode mode,
+                               int rw, int rh) {
     SDL_Color gray = { 150, 150, 160, 255 };
     SDL_Color accent = { 255, 210, 90, 255 };
     SDL_Color white = { 235, 235, 235, 255 };
 
+    int bar_top_y = BAR_TOP_Y(rh);
+    int mode_button_y = MODE_BUTTON_Y(rh);
+    int bar_track_y = BAR_TRACK_Y(rh);
+
     SDL_SetRenderDrawColor(renderer, 10, 10, 14, 190);
-    SDL_Rect overlay = { 0, BAR_TOP_Y, SCREEN_W, BAR_OVERLAY_H };
+    SDL_Rect overlay = { 0, bar_top_y, rw, BAR_OVERLAY_H };
     SDL_RenderFillRect(renderer, &overlay);
 
     char page_counter[32];
     snprintf(page_counter, sizeof(page_counter), UI->page_counter_fmt, page_index + 1, page_count);
-    draw_text(renderer, page_counter, BAR_MARGIN, BAR_TOP_Y + 8, white);
+    draw_text(renderer, page_counter, BAR_MARGIN, bar_top_y + 8, white);
 
-    draw_rect_outline(renderer, MODE_BUTTON_X, MODE_BUTTON_Y, MODE_BUTTON_W, MODE_BUTTON_H,
+    draw_rect_outline(renderer, MODE_BUTTON_X, mode_button_y, MODE_BUTTON_W, MODE_BUTTON_H,
                        255, 210, 90, 255, 2);
     const char *mode_label = (mode == READ_MODE_PAGE) ? UI->mode_label_page : UI->mode_label_strip;
     int mode_label_w = text_width(mode_label);
     draw_text(renderer, mode_label, MODE_BUTTON_X + (MODE_BUTTON_W - mode_label_w) / 2,
-               MODE_BUTTON_Y + 5, accent);
+               mode_button_y + 5, accent);
 
     const char *hint = (mode == READ_MODE_PAGE) ? UI->reader_hint_page : UI->reader_hint_strip;
     int hint_w = text_width(hint);
-    draw_text(renderer, hint, SCREEN_W - BAR_MARGIN - hint_w, BAR_TOP_Y + 8, gray);
+    draw_text(renderer, hint, rw - BAR_MARGIN - hint_w, bar_top_y + 8, gray);
 
     int track_left = BAR_MARGIN;
-    int track_right = SCREEN_W - BAR_MARGIN;
+    int track_right = rw - BAR_MARGIN;
     SDL_SetRenderDrawColor(renderer, 70, 70, 85, 255);
-    SDL_Rect track = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, track_right - track_left, BAR_TRACK_H };
+    SDL_Rect track = { track_left, bar_track_y - BAR_TRACK_H / 2, track_right - track_left, BAR_TRACK_H };
     SDL_RenderFillRect(renderer, &track);
 
     float progress_fraction = (page_count > 1) ? (float)page_index / (float)(page_count - 1) : 0.0f;
     int filled_w = (int)((track_right - track_left) * progress_fraction);
     SDL_SetRenderDrawColor(renderer, 255, 210, 90, 255);
-    SDL_Rect filled = { track_left, BAR_TRACK_Y - BAR_TRACK_H / 2, filled_w, BAR_TRACK_H };
+    SDL_Rect filled = { track_left, bar_track_y - BAR_TRACK_H / 2, filled_w, BAR_TRACK_H };
     SDL_RenderFillRect(renderer, &filled);
 
     int thumb_x = track_left + filled_w;
     SDL_SetRenderDrawColor(renderer, 255, 230, 150, 255);
-    SDL_Rect thumb = { thumb_x - BAR_THUMB_R, BAR_TRACK_Y - BAR_THUMB_R,
+    SDL_Rect thumb = { thumb_x - BAR_THUMB_R, bar_track_y - BAR_THUMB_R,
                        BAR_THUMB_R * 2, BAR_THUMB_R * 2 };
     SDL_RenderFillRect(renderer, &thumb);
 }
 
 static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_index,
-                           int page_count, float zoom, float *pan_x, float *pan_y, bool bar_visible) {
+                           int page_count, float zoom, float *pan_x, float *pan_y, bool bar_visible,
+                           int rw, int rh) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
@@ -640,12 +660,12 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
         int tex_w, tex_h;
         SDL_QueryTexture(tex, NULL, NULL, &tex_w, &tex_h);
 
-        float base_scale = (float)SCREEN_H / tex_h;
+        float base_scale = (float)rh / tex_h;
         int draw_w = (int)(tex_w * base_scale * zoom);
         int draw_h = (int)(tex_h * base_scale * zoom);
 
-        float max_pan_x = (draw_w > SCREEN_W) ? (draw_w - SCREEN_W) / 2.0f : 0.0f;
-        float max_pan_y = (draw_h > SCREEN_H) ? (draw_h - SCREEN_H) / 2.0f : 0.0f;
+        float max_pan_x = (draw_w > rw) ? (draw_w - rw) / 2.0f : 0.0f;
+        float max_pan_y = (draw_h > rh) ? (draw_h - rh) / 2.0f : 0.0f;
 
         if (*pan_x > max_pan_x) *pan_x = max_pan_x;
         if (*pan_x < -max_pan_x) *pan_x = -max_pan_x;
@@ -653,31 +673,31 @@ static void render_reader(SDL_Renderer *renderer, SDL_Texture *tex, int page_ind
         if (*pan_y < -max_pan_y) *pan_y = -max_pan_y;
 
         SDL_Rect dst = {
-            (SCREEN_W - draw_w) / 2 + (int)*pan_x,
-            (SCREEN_H - draw_h) / 2 + (int)*pan_y,
+            (rw - draw_w) / 2 + (int)*pan_x,
+            (rh - draw_h) / 2 + (int)*pan_y,
             draw_w, draw_h
         };
         SDL_RenderCopy(renderer, tex, NULL, &dst);
     } else {
         SDL_Color gray = { 150, 150, 160, 255 };
-        draw_text(renderer, UI->reader_error_page, 40, SCREEN_H / 2, gray);
+        draw_text(renderer, UI->reader_error_page, 40, rh / 2, gray);
     }
 
     if (bar_visible) {
-        render_reader_bar(renderer, page_index, page_count, READ_MODE_PAGE);
+        render_reader_bar(renderer, page_index, page_count, READ_MODE_PAGE, rw, rh);
     }
 }
 
 static void render_reader_strip(SDL_Renderer *renderer, int page_count, bool bar_visible,
-                                 float zoom, float *pan_x) {
+                                 float zoom, float *pan_x, int rw, int rh) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
 
-    int draw_w = (int)(SCREEN_W * zoom);
-    float max_pan_x = (draw_w > SCREEN_W) ? (draw_w - SCREEN_W) / 2.0f : 0.0f;
+    int draw_w = (int)(rw * zoom);
+    float max_pan_x = (draw_w > rw) ? (draw_w - rw) / 2.0f : 0.0f;
     if (*pan_x > max_pan_x) *pan_x = max_pan_x;
     if (*pan_x < -max_pan_x) *pan_x = -max_pan_x;
-    int x_pos = (SCREEN_W - draw_w) / 2 + (int)*pan_x;
+    int x_pos = (rw - draw_w) / 2 + (int)*pan_x;
 
     float y_cursor = -g_strip_scroll * zoom;
     for (int i = 0; i < STRIP_CENTER; i++) {
@@ -691,7 +711,7 @@ static void render_reader_strip(SDL_Renderer *renderer, int page_count, bool bar
 
         int slot_draw_h = (int)((float)g_strip[i].draw_h * zoom);
         SDL_Rect dst = { x_pos, (int)y_cursor, draw_w, slot_draw_h };
-        if (dst.y + dst.h > 0 && dst.y < SCREEN_H) {
+        if (dst.y + dst.h > 0 && dst.y < rh) {
             SDL_RenderCopy(renderer, g_strip[i].tex, NULL, &dst);
         }
         y_cursor += (float)slot_draw_h;
@@ -699,15 +719,15 @@ static void render_reader_strip(SDL_Renderer *renderer, int page_count, bool bar
 
     int current_page = g_strip[STRIP_CENTER].page_index >= 0 ? g_strip[STRIP_CENTER].page_index : 0;
     if (bar_visible) {
-        render_reader_bar(renderer, current_page, page_count, READ_MODE_STRIP);
+        render_reader_bar(renderer, current_page, page_count, READ_MODE_STRIP, rw, rh);
     }
 }
 
-static int page_from_bar_x(int x, int page_count) {
+static int page_from_bar_x(int x, int page_count, int rw) {
     if (page_count <= 1) return 0;
 
     int track_left = BAR_MARGIN;
-    int track_right = SCREEN_W - BAR_MARGIN;
+    int track_right = rw - BAR_MARGIN;
 
     float fraction = (float)(x - track_left) / (float)(track_right - track_left);
     if (fraction < 0.0f) fraction = 0.0f;
@@ -859,6 +879,17 @@ int main(int argc, char *argv[]) {
         SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
+    // Canevas portrait utilisé uniquement en lecture, quand l'utilisateur
+    // bascule en mode tourné à 90° (voir touche "-").
+    SDL_Texture *canvas_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                                  SDL_TEXTUREACCESS_TARGET, CANVAS_W, CANVAS_H);
+    if (canvas_tex) {
+        SDL_SetTextureBlendMode(canvas_tex, SDL_BLENDMODE_BLEND);
+    } else {
+        printf("Impossible de créer le canevas portrait: %s\n", SDL_GetError());
+    }
+    bool rotated = false; // mode paysage/portrait tourné, actif seulement en lecture
+
     load_system_font();
 
     SDL_GameController *pad = NULL;
@@ -901,7 +932,8 @@ int main(int argc, char *argv[]) {
     bool running = true;
     bool prev_up = false, prev_down = false, prev_left = false, prev_right = false,
          prev_a = false, prev_b = false, prev_plus = false, prev_l = false,
-         prev_r = false, prev_r3 = false, prev_y_btn = false, prev_x_btn = false;
+         prev_r = false, prev_r3 = false, prev_y_btn = false, prev_x_btn = false,
+         prev_minus = false;
 
     bool bar_visible = true;
 
@@ -961,10 +993,26 @@ int main(int argc, char *argv[]) {
                     finger_id = -100;
                 }
 
+                // En mode tourné, les coordonnées tactiles physiques (écran
+                // fixe, toujours en paysage) doivent être converties vers le
+                // repère du canevas portrait avant toute utilisation.
+                // Transformation dérivée pour une rotation d'affichage à -90°
+                // (rotation physique horaire de la console pour lire à l'endroit).
+                if (rotated && touch_x >= 0) {
+                    int raw_x = touch_x, raw_y = touch_y;
+                    touch_x = CANVAS_W - raw_y;
+                    touch_y = raw_x;
+                }
+
+                int cur_rw = rotated ? CANVAS_W : SCREEN_W;
+                int cur_rh = rotated ? CANVAS_H : SCREEN_H;
+                int mode_button_y_now = MODE_BUTTON_Y(cur_rh);
+                int bar_top_y_now = BAR_TOP_Y(cur_rh);
+
                 bool was_bar_visible = bar_visible;
                 bool hit_mode_button = was_bar_visible && is_down
                                      && touch_x >= MODE_BUTTON_X && touch_x <= MODE_BUTTON_X + MODE_BUTTON_W
-                                     && touch_y >= MODE_BUTTON_Y && touch_y <= MODE_BUTTON_Y + MODE_BUTTON_H;
+                                     && touch_y >= mode_button_y_now && touch_y <= mode_button_y_now + MODE_BUTTON_H;
 
                 if (is_down && !hit_mode_button) {
                     bar_visible = false;
@@ -975,20 +1023,17 @@ int main(int argc, char *argv[]) {
                         read_mode = READ_MODE_STRIP;
                         zoom = ZOOM_MIN;
                         pan_x = 0.0f;
-                        strip_reset(renderer, &ar);
-                    } else {
-                        read_mode = READ_MODE_PAGE;
-                        zoom = ZOOM_MIN;
+                        strip_reset(renderer, &ar, cur_rw);
                         pan_x = 0.0f;
                         pan_y = 0.0f;
                         load_current_page(renderer, &ar, &page_tex);
                     }
                 } else if (read_mode == READ_MODE_PAGE) {
-                    if (is_down && was_bar_visible && touch_y >= BAR_TOP_Y && ar.page_count > 0) {
+                    if (is_down && was_bar_visible && touch_y >= bar_top_y_now && ar.page_count > 0) {
                         bar_dragging = true;
-                        drag_target_page = page_from_bar_x(touch_x, ar.page_count);
+                        drag_target_page = page_from_bar_x(touch_x, ar.page_count, cur_rw);
                     } else if (is_move && bar_dragging && ar.page_count > 0) {
-                        drag_target_page = page_from_bar_x(touch_x, ar.page_count);
+                        drag_target_page = page_from_bar_x(touch_x, ar.page_count, cur_rw);
                     } else if (is_up && bar_dragging) {
                         bar_dragging = false;
                         if (drag_target_page != ar.current_page) {
@@ -999,7 +1044,7 @@ int main(int argc, char *argv[]) {
                             load_current_page(renderer, &ar, &page_tex);
                             save_current_progress(&ar);
                         }
-                    } else if (is_down && touch_y < BAR_TOP_Y) {
+                    } else if (is_down && touch_y < bar_top_y_now) {
                         if (swipe_finger_id == -1 && pinch_finger2_id == -1) {
                             swipe_finger_id = finger_id;
                             swipe_start_x = touch_x;
@@ -1031,7 +1076,7 @@ int main(int argc, char *argv[]) {
                             float current_distance = touch_distance(pinch_x1, pinch_y1, pinch_x2, pinch_y2);
                             float delta = current_distance - pinch_last_distance;
                             zoom += delta * PINCH_ZOOM_SCALE;
-                            float min_zoom = min_zoom_for_texture(page_tex);
+                            float min_zoom = min_zoom_for_texture(page_tex, cur_rw, cur_rh);
                             if (zoom < min_zoom) zoom = min_zoom;
                             if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
                             pinch_last_distance = current_distance;
@@ -1080,7 +1125,8 @@ int main(int argc, char *argv[]) {
 
         bool up = false, down = false, left = false, right = false;
         bool a = false, b = false, plus = false, l = false, r = false, r3 = false, y_btn = false, x_btn = false;
-        int right_y = 0, left_x = 0, left_y = 0;
+        bool minus_btn = false;
+        int right_y = 0, left_x = 0, left_y = 0, right_x = 0;
         if (pad) {
             up    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP)
                  || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
@@ -1098,8 +1144,10 @@ int main(int argc, char *argv[]) {
             r3   = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
             y_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_X);
             x_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y);
+            minus_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK);
 
             right_y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
+            right_x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
             left_x  = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
             left_y  = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
         }
@@ -1175,7 +1223,7 @@ int main(int argc, char *argv[]) {
                     read_mode = READ_MODE_STRIP;
                     zoom = ZOOM_MIN;
                     pan_x = 0.0f;
-                    strip_reset(renderer, &ar);
+                    strip_reset(renderer, &ar, rotated ? CANVAS_W : SCREEN_W);
                 } else {
                     read_mode = READ_MODE_PAGE;
                     zoom = ZOOM_MIN;
@@ -1189,20 +1237,44 @@ int main(int argc, char *argv[]) {
                 bar_visible = !bar_visible;
             }
 
+            // Bascule paysage/portrait (touche "-"). Rotation physique dans le
+            // sens horaire attendue : on remappe les sticks en conséquence pour
+            // que "monter/descendre/gauche/droite" restent intuitifs une fois
+            // la console tournée.
+            if (minus_btn && !prev_minus) {
+                rotated = !rotated;
+                if (read_mode == READ_MODE_STRIP) {
+                    // Les pages déjà chargées sont à l'échelle de l'ancienne
+                    // largeur : on recharge pour la nouvelle orientation, sinon
+                    // l'image reste déformée jusqu'au prochain changement de mode.
+                    strip_reset(renderer, &ar, rotated ? CANVAS_W : SCREEN_W);
+                }
+            }
+
+            int render_w = rotated ? CANVAS_W : SCREEN_W;
+            int render_h = rotated ? CANVAS_H : SCREEN_H;
+
+            // Stick gauche : en rotation, l'axe X du stick pilote le
+            // vertical (monter/descendre), et l'axe Y (inversé) pilote
+            // l'horizontal — cohérent avec une rotation physique horaire.
+            int effective_left_y = rotated ? left_x : left_y;
+            int effective_left_x = rotated ? -left_y : left_x;
+            int effective_right_y = rotated ? right_x : right_y;
+
             if (read_mode == READ_MODE_PAGE) {
-                if (abs(right_y) > STICK_DEADZONE) {
-                    float normalized = -right_y / 32768.0f;
+                if (abs(effective_right_y) > STICK_DEADZONE) {
+                    float normalized = -effective_right_y / 32768.0f;
                     zoom += normalized * ZOOM_SPEED_PER_FRAME;
-                    float min_zoom = min_zoom_for_texture(page_tex);
+                    float min_zoom = min_zoom_for_texture(page_tex, render_w, render_h);
                     if (zoom < min_zoom) zoom = min_zoom;
                     if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
                 }
 
-                if (abs(left_x) > STICK_DEADZONE) {
-                    pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
+                if (abs(effective_left_x) > STICK_DEADZONE) {
+                    pan_x += (effective_left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
                 }
-                if (abs(left_y) > STICK_DEADZONE) {
-                    pan_y -= (left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
+                if (abs(effective_left_y) > STICK_DEADZONE) {
+                    pan_y -= (effective_left_y / 32768.0f) * PAN_SPEED_PER_FRAME;
                 }
 
                 if (r3 && !prev_r3) {
@@ -1232,20 +1304,20 @@ int main(int argc, char *argv[]) {
                     }
                 }
             } else {
-                if (abs(right_y) > STICK_DEADZONE) {
-                    float normalized = -right_y / 32768.0f;
+                if (abs(effective_right_y) > STICK_DEADZONE) {
+                    float normalized = -effective_right_y / 32768.0f;
                     zoom += normalized * ZOOM_SPEED_PER_FRAME;
-                    if (zoom < ZOOM_MIN) zoom = ZOOM_MIN;
+                    if (zoom < STRIP_ZOOM_MIN) zoom = STRIP_ZOOM_MIN;
                     if (zoom > ZOOM_MAX) zoom = ZOOM_MAX;
                 }
 
-                if (abs(left_y) > STICK_DEADZONE) {
-                    strip_apply_scroll(renderer, &ar, (left_y / 32768.0f) * PAN_SPEED_PER_FRAME);
+                if (abs(effective_left_y) > STICK_DEADZONE) {
+                    strip_apply_scroll(renderer, &ar, (effective_left_y / 32768.0f) * PAN_SPEED_PER_FRAME);
                     save_current_progress(&ar);
                 }
 
-                if (zoom > ZOOM_MIN && abs(left_x) > STICK_DEADZONE) {
-                    pan_x += (left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
+                if (zoom > ZOOM_MIN && abs(effective_left_x) > STICK_DEADZONE) {
+                    pan_x += (effective_left_x / 32768.0f) * PAN_SPEED_PER_FRAME;
                 }
 
                 if (r3 && !prev_r3) {
@@ -1254,11 +1326,11 @@ int main(int argc, char *argv[]) {
                 }
 
                 if (r && !prev_r) {
-                    strip_apply_scroll(renderer, &ar, (float)SCREEN_H);
+                    strip_apply_scroll(renderer, &ar, (float)render_h);
                     save_current_progress(&ar);
                 }
                 if (l && !prev_l) {
-                    strip_apply_scroll(renderer, &ar, -(float)SCREEN_H);
+                    strip_apply_scroll(renderer, &ar, -(float)render_h);
                     save_current_progress(&ar);
                 }
             }
@@ -1285,6 +1357,7 @@ int main(int argc, char *argv[]) {
         prev_a = a; prev_b = b; prev_plus = plus; prev_l = l; prev_r = r; prev_r3 = r3;
         prev_y_btn = y_btn;
         prev_x_btn = x_btn;
+        prev_minus = minus_btn;
 
         if (state == APP_STATE_BROWSER) {
             if (fb_is_at_root(&fb)) {
@@ -1293,17 +1366,40 @@ int main(int argc, char *argv[]) {
                 render_folder_detail(renderer, &fb);
             }
         } else {
-            if (read_mode == READ_MODE_PAGE) {
-                int display_page = bar_dragging ? drag_target_page : ar.current_page;
-                render_reader(renderer, page_tex, display_page, ar.page_count, zoom, &pan_x, &pan_y, bar_visible);
+            if (rotated && canvas_tex) {
+                SDL_SetRenderTarget(renderer, canvas_tex);
+                if (read_mode == READ_MODE_PAGE) {
+                    int display_page = bar_dragging ? drag_target_page : ar.current_page;
+                    render_reader(renderer, page_tex, display_page, ar.page_count, zoom,
+                                   &pan_x, &pan_y, bar_visible, CANVAS_W, CANVAS_H);
+                } else {
+                    render_reader_strip(renderer, ar.page_count, bar_visible, zoom, &pan_x, CANVAS_W, CANVAS_H);
+                }
+                SDL_SetRenderTarget(renderer, NULL);
+
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+                SDL_RenderClear(renderer);
+
+                // Rotation -90° (physique horaire attendue de la console pour
+                // lire à l'endroit) : le canevas portrait (720x1280) tourné
+                // occupe exactement les 1280x720 de l'écran réel.
+                SDL_Rect dst = { (SCREEN_W - CANVAS_W) / 2, (SCREEN_H - CANVAS_H) / 2, CANVAS_W, CANVAS_H };
+                SDL_RenderCopyEx(renderer, canvas_tex, NULL, &dst, -90.0, NULL, SDL_FLIP_NONE);
             } else {
-                render_reader_strip(renderer, ar.page_count, bar_visible, zoom, &pan_x);
+                if (read_mode == READ_MODE_PAGE) {
+                    int display_page = bar_dragging ? drag_target_page : ar.current_page;
+                    render_reader(renderer, page_tex, display_page, ar.page_count, zoom,
+                                   &pan_x, &pan_y, bar_visible, SCREEN_W, SCREEN_H);
+                } else {
+                    render_reader_strip(renderer, ar.page_count, bar_visible, zoom, &pan_x, SCREEN_W, SCREEN_H);
+                }
             }
         }
         SDL_RenderPresent(renderer);
     }
 
     if (page_tex) SDL_DestroyTexture(page_tex);
+    if (canvas_tex) SDL_DestroyTexture(canvas_tex);
     strip_clear_all();
     clear_thumbnail_cache();
     if (pad) SDL_GameControllerClose(pad);
