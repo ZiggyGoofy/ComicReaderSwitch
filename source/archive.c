@@ -5,6 +5,7 @@
 
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -12,7 +13,7 @@
 // (SDL2_image, avec les libs installées, gère bien jpg/jpeg/png).
 static bool has_image_extension(const char *name) {
     size_t len = strlen(name);
-    const char *exts[] = { ".jpg", ".jpeg", ".png" };
+    const char *exts[] = { ".jpg", ".jpeg", ".png", ".webp" };
     for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
         size_t elen = strlen(exts[i]);
         if (len >= elen && strcasecmp(name + len - elen, exts[i]) == 0) {
@@ -22,10 +23,43 @@ static bool has_image_extension(const char *name) {
     return false;
 }
 
+// Comparaison "naturelle" insensible à la casse : les suites de chiffres sont
+// comparées comme des nombres plutôt que caractère par caractère, pour que
+// "page2.jpg" passe bien avant "page10.jpg" (au lieu de l'ordre alphabétique
+// strict qui donnerait page1, page10, page11, ..., page2).
+static int natural_casecmp(const char *a, const char *b) {
+    while (*a && *b) {
+        if (isdigit((unsigned char)*a) && isdigit((unsigned char)*b)) {
+            while (*a == '0' && isdigit((unsigned char)a[1])) a++;
+            while (*b == '0' && isdigit((unsigned char)b[1])) b++;
+
+            const char *a_digits = a;
+            const char *b_digits = b;
+            while (isdigit((unsigned char)*a)) a++;
+            while (isdigit((unsigned char)*b)) b++;
+
+            size_t a_len = (size_t)(a - a_digits);
+            size_t b_len = (size_t)(b - b_digits);
+            if (a_len != b_len) return (a_len < b_len) ? -1 : 1;
+
+            int cmp = strncmp(a_digits, b_digits, a_len);
+            if (cmp != 0) return cmp;
+            continue;
+        }
+
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        a++;
+        b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
 static int page_cmp(const void *a, const void *b) {
     const ArPageEntry *ea = (const ArPageEntry *)a;
     const ArPageEntry *eb = (const ArPageEntry *)b;
-    return strcasecmp(ea->name, eb->name);
+    return natural_casecmp(ea->name, eb->name);
 }
 
 bool ar_open(ComicArchive *ar, const char *path) {
@@ -80,8 +114,8 @@ bool ar_extract_page(ComicArchive *ar, int index, void **out_data, size_t *out_s
     if (index < 0 || index >= ar->page_count) return false;
 
     // La position à viser dans le FLUX BRUT de l'archive n'est pas forcément
-    // `index` (qui est la position dans notre liste triée alphabétiquement) :
-    // c'est stream_index, mémorisé lors du scan initial dans ar_open.
+    // `index` (qui est la position dans notre liste triée) : c'est
+    // stream_index, mémorisé lors du scan initial dans ar_open.
     int target_stream_pos = ar->pages[index].stream_index;
 
     // Si on n'a pas de handle ouvert, ou si la position visée est déjà

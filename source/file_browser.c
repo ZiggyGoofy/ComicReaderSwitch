@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <string.h>
 #include <strings.h>   // strcasecmp
+#include <ctype.h>     // isdigit, tolower
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -14,14 +15,48 @@ static bool has_comic_extension(const char *name) {
     return strcasecmp(ext, ".cbz") == 0 || strcasecmp(ext, ".cbr") == 0;
 }
 
-// Comparateur pour qsort : dossiers d'abord, puis ordre alphabétique.
+// Comparaison "naturelle" insensible à la casse : les suites de chiffres sont
+// comparées comme des nombres plutôt que caractère par caractère, pour que
+// "2" passe bien avant "10" (au lieu de l'ordre alphabétique strict qui
+// donnerait 1, 10, 11, ..., 2).
+static int natural_casecmp(const char *a, const char *b) {
+    while (*a && *b) {
+        if (isdigit((unsigned char)*a) && isdigit((unsigned char)*b)) {
+            // Ignore les zéros non significatifs (ex: "007" doit valoir 7).
+            while (*a == '0' && isdigit((unsigned char)a[1])) a++;
+            while (*b == '0' && isdigit((unsigned char)b[1])) b++;
+
+            const char *a_digits = a;
+            const char *b_digits = b;
+            while (isdigit((unsigned char)*a)) a++;
+            while (isdigit((unsigned char)*b)) b++;
+
+            size_t a_len = (size_t)(a - a_digits);
+            size_t b_len = (size_t)(b - b_digits);
+            if (a_len != b_len) return (a_len < b_len) ? -1 : 1;
+
+            int cmp = strncmp(a_digits, b_digits, a_len);
+            if (cmp != 0) return cmp;
+            continue; // nombres égaux, on continue juste après
+        }
+
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        a++;
+        b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+// Comparateur pour qsort : dossiers d'abord, puis tri naturel par nom.
 static int entry_cmp(const void *a, const void *b) {
     const FBEntry *ea = (const FBEntry *)a;
     const FBEntry *eb = (const FBEntry *)b;
     if (ea->is_dir != eb->is_dir) {
         return ea->is_dir ? -1 : 1;
     }
-    return strcasecmp(ea->name, eb->name);
+    return natural_casecmp(ea->name, eb->name);
 }
 
 bool fb_scan(FileBrowser *fb) {
@@ -129,8 +164,8 @@ bool fb_find_representative_comic(const char *dir_path, char *out, size_t outsiz
     DIR *dir = opendir(dir_path);
     if (!dir) return false;
 
-    // On ne garde que le meilleur candidat vu jusqu'ici (le plus petit
-    // alphabétiquement), au lieu de collecter tous les noms dans des tableaux :
+    // On ne garde que le meilleur candidat vu jusqu'ici (le plus petit selon
+    // le tri naturel), au lieu de collecter tous les noms dans des tableaux :
     // ça évite une grosse consommation de pile, importante ici car la fonction
     // est récursive (un dossier sans comic direct descend dans ses sous-dossiers).
     char best_comic[FB_MAX_NAME] = "";
@@ -143,13 +178,13 @@ bool fb_find_representative_comic(const char *dir_path, char *out, size_t outsiz
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
 
         if (ent->d_type == DT_DIR) {
-            if (!has_subdir || strcasecmp(ent->d_name, best_subdir) < 0) {
+            if (!has_subdir || natural_casecmp(ent->d_name, best_subdir) < 0) {
                 strncpy(best_subdir, ent->d_name, FB_MAX_NAME - 1);
                 best_subdir[FB_MAX_NAME - 1] = '\0';
                 has_subdir = true;
             }
         } else if (has_comic_extension(ent->d_name)) {
-            if (!has_comic || strcasecmp(ent->d_name, best_comic) < 0) {
+            if (!has_comic || natural_casecmp(ent->d_name, best_comic) < 0) {
                 strncpy(best_comic, ent->d_name, FB_MAX_NAME - 1);
                 best_comic[FB_MAX_NAME - 1] = '\0';
                 has_comic = true;

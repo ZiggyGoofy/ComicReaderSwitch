@@ -92,6 +92,19 @@ static PlFontData g_font_data;
 
 static const UIStrings *UI = NULL;
 
+// Petit message d'erreur temporaire affiché à l'écran (dossier/bibliothèque),
+// pour les échecs qui seraient sinon invisibles (ex: archive impossible à
+// ouvrir). Se dessine par-dessus l'écran courant pendant quelques secondes.
+#define ERROR_MSG_DURATION_FRAMES 240 // ~4 secondes à 60 fps
+static char g_error_message[160] = "";
+static int g_error_frames_left = 0;
+
+static void show_error_message(const char *msg) {
+    strncpy(g_error_message, msg, sizeof(g_error_message) - 1);
+    g_error_message[sizeof(g_error_message) - 1] = '\0';
+    g_error_frames_left = ERROR_MSG_DURATION_FRAMES;
+}
+
 static char g_entry_labels[FB_MAX_ENTRIES][40];
 static SDL_Texture *g_thumb_textures[FB_MAX_ENTRIES];
 static bool g_thumb_attempted[FB_MAX_ENTRIES];
@@ -168,6 +181,19 @@ static void refresh_entry_labels(const FileBrowser *fb) {
 static void on_directory_changed(const FileBrowser *fb) {
     clear_thumbnail_cache();
     refresh_entry_labels(fb);
+}
+
+// Après être entré dans un dossier, sélectionne automatiquement le premier
+// chapitre marqué "en cours" (s'il y en a un), pour reprendre directement la
+// lecture là où on s'était arrêté plutôt que de toujours repartir du début
+// de la liste.
+static void select_in_progress_entry(FileBrowser *fb) {
+    for (int i = 0; i < fb->entry_count; i++) {
+        if (g_entry_labels[i][0] != '\0' && strcmp(g_entry_labels[i], UI->progress_done) != 0) {
+            fb->selected = i;
+            return;
+        }
+    }
 }
 
 static void draw_rect(SDL_Renderer *r, int x, int y, int w, int h,
@@ -440,6 +466,27 @@ static void render_folder_detail(SDL_Renderer *renderer, const FileBrowser *fb) 
         }
     }
 
+    // Barre de défilement visuelle (seulement si tout ne tient pas à l'écran).
+    if (fb->entry_count > visible_rows) {
+        int scrollbar_x = SCREEN_W - 14;
+        int scrollbar_w = 6;
+        SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
+        SDL_Rect track = { scrollbar_x, list_top, scrollbar_w, available_h };
+        SDL_RenderFillRect(renderer, &track);
+
+        float thumb_h_ratio = (float)visible_rows / (float)fb->entry_count;
+        int thumb_h = (int)(available_h * thumb_h_ratio);
+        if (thumb_h < 24) thumb_h = 24; // taille minimale pour rester visible/cliquable
+
+        int max_start = fb->entry_count - visible_rows;
+        float scroll_ratio = (max_start > 0) ? (float)start / (float)max_start : 0.0f;
+        int thumb_y = list_top + (int)((available_h - thumb_h) * scroll_ratio);
+
+        SDL_SetRenderDrawColor(renderer, 255, 210, 90, 255);
+        SDL_Rect thumb = { scrollbar_x, thumb_y, scrollbar_w, thumb_h };
+        SDL_RenderFillRect(renderer, &thumb);
+    }
+
     draw_text(renderer, UI->detail_footer,
                DETAIL_MARGIN, SCREEN_H - 34, gray);
 }
@@ -492,15 +539,15 @@ static void strip_clear_slot(int i) {
     g_strip[i].draw_h = 0;
 }
 
-// Largeur de référence utilisée pour mettre les pages à l'échelle en mode
-// défilement — correspond à la largeur d'affichage actuelle (paysage ou
-// portrait tourné), mise à jour à chaque appel de strip_reset.
-static int g_strip_render_w = SCREEN_W;
-
 static void strip_clear_all(void) {
     for (int i = 0; i < STRIP_WINDOW; i++) strip_clear_slot(i);
     g_strip_scroll = 0.0f;
 }
+
+// Largeur de référence utilisée pour mettre les pages à l'échelle en mode
+// défilement — correspond à la largeur d'affichage actuelle (paysage ou
+// portrait tourné), mise à jour à chaque appel de strip_reset.
+static int g_strip_render_w = SCREEN_W;
 
 static void strip_load_slot(SDL_Renderer *renderer, ComicArchive *ar, int slot_i, int page_index) {
     strip_clear_slot(slot_i);
@@ -866,7 +913,7 @@ int main(int argc, char *argv[]) {
         printf("TTF_Init a échoué: %s\n", TTF_GetError());
     }
 
-    int img_flags = IMG_INIT_JPG | IMG_INIT_PNG;
+    int img_flags = IMG_INIT_JPG | IMG_INIT_PNG | IMG_INIT_WEBP;
     if ((IMG_Init(img_flags) & img_flags) != img_flags) {
         printf("IMG_Init n'a pas pu charger tous les décodeurs: %s\n", IMG_GetError());
     }
@@ -1024,7 +1071,6 @@ int main(int argc, char *argv[]) {
                         zoom = ZOOM_MIN;
                         pan_x = 0.0f;
                         strip_reset(renderer, &ar, cur_rw);
-                        pan_x = 0.0f;
                         pan_y = 0.0f;
                         load_current_page(renderer, &ar, &page_tex);
                     }
@@ -1181,7 +1227,10 @@ int main(int argc, char *argv[]) {
 
             if (a && !prev_a) {
                 if (fb_selected_is_dir(&fb)) {
-                    if (fb_enter_selected(&fb)) on_directory_changed(&fb);
+                    if (fb_enter_selected(&fb)) {
+                        on_directory_changed(&fb);
+                        select_in_progress_entry(&fb);
+                    }
                 } else {
                     char full_path[FB_MAX_PATH];
                     if (fb_get_selected_path(&fb, full_path, sizeof(full_path))) {
@@ -1208,6 +1257,10 @@ int main(int argc, char *argv[]) {
                             state = APP_STATE_READER;
                         } else {
                             printf("Impossible d'ouvrir l'archive: %s\n", full_path);
+                            char msg[160];
+                            snprintf(msg, sizeof(msg), "Impossible d'ouvrir \"%s\" (fichier corrompu ou format non supporté)",
+                                     fb.entries[fb.selected].name);
+                            show_error_message(msg);
                         }
                     }
                 }
@@ -1364,6 +1417,20 @@ int main(int argc, char *argv[]) {
                 render_library(renderer, &fb);
             } else {
                 render_folder_detail(renderer, &fb);
+            }
+
+            if (g_error_frames_left > 0) {
+                int msg_w = text_width(g_error_message);
+                int box_w = msg_w + 60;
+                int box_h = 50;
+                int box_x = (SCREEN_W - box_w) / 2;
+                int box_y = 30;
+                SDL_SetRenderDrawColor(renderer, 130, 30, 30, 235);
+                SDL_Rect box = { box_x, box_y, box_w, box_h };
+                SDL_RenderFillRect(renderer, &box);
+                SDL_Color white = { 255, 255, 255, 255 };
+                draw_text(renderer, g_error_message, box_x + 30, box_y + 13, white);
+                g_error_frames_left--;
             }
         } else {
             if (rotated && canvas_tex) {
