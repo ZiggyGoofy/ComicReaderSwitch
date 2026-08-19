@@ -984,6 +984,12 @@ int main(int argc, char *argv[]) {
 
     bool bar_visible = true;
 
+    // Répétition automatique haut/bas dans la liste d'un dossier : compte le
+    // nombre d'images consécutives où la touche/le stick reste maintenu.
+    int detail_up_hold = 0, detail_down_hold = 0;
+    #define DETAIL_REPEAT_DELAY_FRAMES 18   // ~0.3s avant que la répétition démarre
+    #define DETAIL_REPEAT_INTERVAL_FRAMES 5 // puis un déplacement toutes les ~5 images
+
     bool bar_dragging = false;
     int drag_target_page = 0;
     bool strip_touch_dragging = false;
@@ -1221,8 +1227,26 @@ int main(int argc, char *argv[]) {
                     fb.selected += 1;
                 }
             } else {
-                if (up && !prev_up)     fb_move_selection(&fb, -1);
-                if (down && !prev_down) fb_move_selection(&fb, 1);
+                // Premier appui : déplacement immédiat. Maintien prolongé :
+                // pause courte puis défilement rapide tant que c'est maintenu.
+                if (up) {
+                    detail_up_hold++;
+                } else {
+                    detail_up_hold = 0;
+                }
+                if (down) {
+                    detail_down_hold++;
+                } else {
+                    detail_down_hold = 0;
+                }
+
+                bool up_repeat = detail_up_hold > DETAIL_REPEAT_DELAY_FRAMES
+                               && (detail_up_hold - DETAIL_REPEAT_DELAY_FRAMES) % DETAIL_REPEAT_INTERVAL_FRAMES == 0;
+                bool down_repeat = detail_down_hold > DETAIL_REPEAT_DELAY_FRAMES
+                                 && (detail_down_hold - DETAIL_REPEAT_DELAY_FRAMES) % DETAIL_REPEAT_INTERVAL_FRAMES == 0;
+
+                if ((up && !prev_up) || up_repeat)     fb_move_selection(&fb, -1);
+                if ((down && !prev_down) || down_repeat) fb_move_selection(&fb, 1);
             }
 
             if (a && !prev_a) {
