@@ -28,11 +28,11 @@
 #define STICK_DEADZONE 8000
 
 #define BAR_MARGIN 40
-#define BAR_OVERLAY_H 74
+#define BAR_OVERLAY_H 110
 #define BAR_TOP_Y(rh) ((rh) - BAR_OVERLAY_H)
-#define BAR_TRACK_Y(rh) ((rh) - 28)
-#define BAR_TRACK_H 8
-#define BAR_THUMB_R 12
+#define BAR_TRACK_Y(rh) ((rh) - 38)
+#define BAR_TRACK_H 16
+#define BAR_THUMB_R 22
 
 #define MODE_BUTTON_X (BAR_MARGIN + 200)
 #define MODE_BUTTON_Y(rh) (BAR_TOP_Y(rh) + 6)
