@@ -57,7 +57,8 @@
 #define GRID_TILE_W ((SCREEN_W - SIDEBAR_W - 2 * CONTENT_MARGIN - (GRID_COLS - 1) * GRID_GAP) / GRID_COLS)
 #define GRID_COVER_H ((int)(GRID_TILE_W * 1.1f))
 #define GRID_TITLE_H 22
-#define GRID_ROW_H (GRID_COVER_H + 8 + GRID_TITLE_H + GRID_GAP)
+#define GRID_COUNTER_H 26 // ligne du compteur, sous le titre
+#define GRID_ROW_H (GRID_COVER_H + 8 + GRID_TITLE_H + GRID_COUNTER_H + GRID_GAP)
 
 #define DETAIL_MARGIN 40
 #define DETAIL_HEADER_H 70
@@ -494,7 +495,7 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
             } else if (g_entry_counts[index][0] != '\0') {
                 SDL_Color count_color = g_entry_all_read[index] ? done_color : gray;
                 draw_text(renderer, g_entry_counts[index], tile_x,
-                           tile_y + GRID_COVER_H + 8 + GRID_TITLE_H - 10, count_color);
+                           tile_y + GRID_COVER_H + 8 + GRID_TITLE_H + 4, count_color);
             }
         }
     }
