@@ -798,6 +798,47 @@ static void save_current_progress(const ComicArchive *ar) {
     }
 }
 
+// Index du prochain chapitre (fichier, pas dossier) après la sélection
+// courante, ou -1 s'il n'y en a pas.
+static int find_next_chapter(const FileBrowser *fb) {
+    for (int i = fb->selected + 1; i < fb->entry_count; i++) {
+        if (!fb->entries[i].is_dir) return i;
+    }
+    return -1;
+}
+
+// En mode défilement : vrai si on est déjà tout en bas de la dernière page.
+static bool strip_at_end(void) {
+    if (g_strip[STRIP_CENTER + 1].page_index >= 0) return false;
+    float max_scroll = (float)g_strip[STRIP_CENTER].draw_h - (float)SCREEN_H;
+    if (max_scroll < 0.0f) max_scroll = 0.0f;
+    return g_strip_scroll >= max_scroll - 1.0f;
+}
+
+// Invite affichée par-dessus le lecteur à la fin d'un chapitre.
+static void render_end_prompt(SDL_Renderer *renderer, int rw, int rh, bool has_next) {
+    const char *title = has_next ? UI->end_title_next : UI->end_title_last;
+    const char *hint = has_next ? UI->end_hint_next : UI->end_hint_last;
+    int tw = text_width(title), hw = text_width(hint);
+    int box_w = (tw > hw ? tw : hw) + 80;
+    if (box_w > rw - 20) box_w = rw - 20;
+    int box_h = 110;
+    int box_x = (rw - box_w) / 2;
+    int box_y = (rh - box_h) / 2;
+
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 20, 20, 30, 235);
+    SDL_Rect box = { box_x, box_y, box_w, box_h };
+    SDL_RenderFillRect(renderer, &box);
+    SDL_SetRenderDrawColor(renderer, 255, 210, 90, 255);
+    SDL_RenderDrawRect(renderer, &box);
+
+    SDL_Color gold = { 255, 210, 90, 255 };
+    SDL_Color white = { 255, 255, 255, 255 };
+    draw_text(renderer, title, box_x + (box_w - tw) / 2, box_y + 22, gold);
+    draw_text(renderer, hint, box_x + (box_w - hw) / 2, box_y + 66, white);
+}
+
 static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
                                char *out_path, size_t out_size) {
     FileBrowser picker;
@@ -983,6 +1024,7 @@ int main(int argc, char *argv[]) {
          prev_minus = false;
 
     bool bar_visible = true;
+    bool end_prompt = false; // invite "chapitre suivant" affichée en fin de chapitre
 
     // Répétition automatique haut/bas dans la liste d'un dossier : compte le
     // nombre d'images consécutives où la touche/le stick reste maintenu.
@@ -1089,6 +1131,7 @@ int main(int argc, char *argv[]) {
                     } else if (is_up && bar_dragging) {
                         bar_dragging = false;
                         if (drag_target_page != ar.current_page) {
+                            end_prompt = false;
                             ar.current_page = drag_target_page;
                             zoom = ZOOM_MIN;
                             pan_x = 0.0f;
@@ -1143,12 +1186,16 @@ int main(int argc, char *argv[]) {
                             int delta_x = swipe_last_x - swipe_start_x;
                             int delta_y = swipe_last_y - swipe_start_y;
                             if (abs(delta_x) > SWIPE_THRESHOLD_PX && abs(delta_x) > abs(delta_y)) {
-                                if (delta_x < 0 && ar.current_page < ar.page_count - 1) {
+                                if (delta_x < 0 && ar.current_page >= ar.page_count - 1) {
+                                    end_prompt = true;
+                                } else if (delta_x < 0 && ar.current_page < ar.page_count - 1) {
+                                    end_prompt = false;
                                     ar_next_page(&ar);
                                     zoom = ZOOM_MIN; pan_x = 0.0f; pan_y = 0.0f;
                                     load_current_page(renderer, &ar, &page_tex);
                                     save_current_progress(&ar);
                                 } else if (delta_x > 0 && ar.current_page > 0) {
+                                    end_prompt = false;
                                     ar_prev_page(&ar);
                                     zoom = ZOOM_MIN; pan_x = 0.0f; pan_y = 0.0f;
                                     load_current_page(renderer, &ar, &page_tex);
@@ -1265,6 +1312,7 @@ int main(int argc, char *argv[]) {
                             read_mode = READ_MODE_PAGE;
                             strip_clear_all();
                             bar_visible = true;
+                            end_prompt = false;
                             swipe_finger_id = -1;
                             swipe_active = false;
                             pinch_finger2_id = -1;
@@ -1290,12 +1338,31 @@ int main(int argc, char *argv[]) {
                 }
             }
 
+            // X : marquer / démarquer le chapitre sélectionné comme lu (vue d'un dossier).
+            if (!at_root && x_btn && !prev_x_btn && fb.entry_count > 0 && !fb_selected_is_dir(&fb)) {
+                char full_path[FB_MAX_PATH];
+                if (fb_get_selected_path(&fb, full_path, sizeof(full_path))) {
+                    int p = 0, t = 0;
+                    bool has = progress_load(full_path, &p, &t) && t > 0;
+                    bool is_done = has && p >= t - 1;
+                    if (is_done) {
+                        progress_clear(full_path);
+                    } else {
+                        if (has) progress_save(full_path, t - 1, t);
+                        else progress_save(full_path, 0, 1);
+                    }
+                    refresh_entry_labels(&fb);
+                    if (!is_done) fb_move_selection(&fb, 1); // enchaîne sur le chapitre suivant
+                }
+            }
+
             if (b && !prev_b) {
                 if (fb_go_parent(&fb)) on_directory_changed(&fb);
             }
 
         } else {
             if (y_btn && !prev_y_btn) {
+                end_prompt = false;
                 if (read_mode == READ_MODE_PAGE) {
                     read_mode = READ_MODE_STRIP;
                     zoom = ZOOM_MIN;
@@ -1325,6 +1392,60 @@ int main(int argc, char *argv[]) {
                     // largeur : on recharge pour la nouvelle orientation, sinon
                     // l'image reste déformée jusqu'au prochain changement de mode.
                     strip_reset(renderer, &ar, rotated ? CANVAS_W : SCREEN_W);
+                }
+            }
+
+            bool prompt_active = end_prompt;
+            if (prompt_active) {
+                if (l && !prev_l) end_prompt = false;
+                if ((a && !prev_a) || (r && !prev_r)) {
+                    int next = find_next_chapter(&fb);
+                    // Le chapitre terminé est marqué comme lu.
+                    if (ar.page_count > 0) progress_save(ar.archive_path, ar.page_count - 1, ar.page_count);
+                    end_prompt = false;
+                    if (page_tex) { SDL_DestroyTexture(page_tex); page_tex = NULL; }
+                    strip_clear_all();
+                    ar_close(&ar);
+
+                    bool opened = false;
+                    if (next >= 0) {
+                        fb.selected = next;
+                        char next_path[FB_MAX_PATH];
+                        if (fb_get_selected_path(&fb, next_path, sizeof(next_path)) && ar_open(&ar, next_path)) {
+                            opened = true;
+                            zoom = ZOOM_MIN; pan_x = 0.0f; pan_y = 0.0f;
+                            swipe_finger_id = -1; swipe_active = false;
+                            pinch_finger2_id = -1; pinching = false;
+
+                            int saved_page, saved_total;
+                            if (progress_load(ar.archive_path, &saved_page, &saved_total)
+                                && saved_page >= 0 && saved_page < saved_total - 1
+                                && saved_page < ar.page_count) {
+                                ar.current_page = saved_page;
+                            }
+                            if (read_mode == READ_MODE_STRIP) {
+                                strip_reset(renderer, &ar, rotated ? CANVAS_W : SCREEN_W);
+                            } else {
+                                load_current_page(renderer, &ar, &page_tex);
+                            }
+                            save_current_progress(&ar);
+                        } else {
+                            char msg[160];
+                            snprintf(msg, sizeof(msg), "Impossible d'ouvrir \"%s\" (fichier corrompu ou format non supporté)",
+                                     fb.entries[next].name);
+                            show_error_message(msg);
+                        }
+                    }
+                    if (!opened) {
+                        state = APP_STATE_BROWSER;
+                        refresh_entry_labels(&fb);
+                    }
+                    prev_a = a; prev_b = b; prev_l = l; prev_r = r; prev_y_btn = y_btn;
+                    prev_x_btn = x_btn; prev_minus = minus_btn;
+                    prev_up = up; prev_down = down; prev_left = left; prev_right = right;
+                    prev_plus = plus; prev_r3 = r3;
+                    SDL_Delay(1);
+                    continue;
                 }
             }
 
@@ -1360,8 +1481,10 @@ int main(int argc, char *argv[]) {
                     pan_y = 0.0f;
                 }
 
-                if (r && !prev_r) {
-                    if (ar.current_page < ar.page_count - 1) {
+                if (r && !prev_r && !prompt_active) {
+                    if (ar.current_page >= ar.page_count - 1) {
+                        end_prompt = true;
+                    } else {
                         ar_next_page(&ar);
                         zoom = ZOOM_MIN;
                         pan_x = 0.0f;
@@ -1370,7 +1493,7 @@ int main(int argc, char *argv[]) {
                         save_current_progress(&ar);
                     }
                 }
-                if (l && !prev_l) {
+                if (l && !prev_l && !prompt_active) {
                     if (ar.current_page > 0) {
                         ar_prev_page(&ar);
                         zoom = ZOOM_MIN;
@@ -1402,17 +1525,22 @@ int main(int argc, char *argv[]) {
                     pan_x = 0.0f;
                 }
 
-                if (r && !prev_r) {
-                    strip_apply_scroll(renderer, &ar, (float)render_h);
-                    save_current_progress(&ar);
+                if (r && !prev_r && !prompt_active) {
+                    if (strip_at_end()) {
+                        end_prompt = true;
+                    } else {
+                        strip_apply_scroll(renderer, &ar, (float)render_h);
+                        save_current_progress(&ar);
+                    }
                 }
-                if (l && !prev_l) {
+                if (l && !prev_l && !prompt_active) {
                     strip_apply_scroll(renderer, &ar, -(float)render_h);
                     save_current_progress(&ar);
                 }
             }
 
             if (b && !prev_b) {
+                end_prompt = false;
                 save_current_progress(&ar);
                 if (page_tex) {
                     SDL_DestroyTexture(page_tex);
@@ -1466,6 +1594,7 @@ int main(int argc, char *argv[]) {
                 } else {
                     render_reader_strip(renderer, ar.page_count, bar_visible, zoom, &pan_x, CANVAS_W, CANVAS_H);
                 }
+                if (end_prompt) render_end_prompt(renderer, CANVAS_W, CANVAS_H, find_next_chapter(&fb) >= 0);
                 SDL_SetRenderTarget(renderer, NULL);
 
                 SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -1484,6 +1613,7 @@ int main(int argc, char *argv[]) {
                 } else {
                     render_reader_strip(renderer, ar.page_count, bar_visible, zoom, &pan_x, SCREEN_W, SCREEN_H);
                 }
+                if (end_prompt) render_end_prompt(renderer, SCREEN_W, SCREEN_H, find_next_chapter(&fb) >= 0);
             }
         }
         SDL_RenderPresent(renderer);

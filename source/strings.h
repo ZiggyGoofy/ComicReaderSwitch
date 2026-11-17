@@ -27,6 +27,11 @@ typedef struct {
     const char *mode_label_page;    // "Mode: Page (Y)"
     const char *mode_label_strip;   // "Mode: Défilement (Y)" / "Mode: Scroll (Y)"
     const char *page_counter_fmt;   // "Page %d / %d"
+
+    const char *end_title_next;     // fin de chapitre, un suivant existe
+    const char *end_hint_next;
+    const char *end_title_last;     // fin du dernier chapitre
+    const char *end_hint_last;
 } UIStrings;
 
 // Détecte la langue configurée sur la console (français ou anglais par

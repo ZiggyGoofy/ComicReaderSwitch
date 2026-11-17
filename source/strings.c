@@ -11,7 +11,7 @@ static const UIStrings k_strings_fr = {
     .parent_quit_footer = "B: dossier parent   +: quitter",
 
     .detail_empty_msg = "Ce dossier est vide.",
-    .detail_footer = "A: ouvrir   B: dossier parent   Haut/Bas: naviguer   +: quitter",
+    .detail_footer = "A: ouvrir   X: marquer lu/non lu   B: dossier parent   Haut/Bas: naviguer   +: quitter",
 
     .progress_done = "Lu",
     .progress_in_progress_fmt = "En cours (p. %d/%d)",
@@ -22,6 +22,11 @@ static const UIStrings k_strings_fr = {
     .mode_label_page = "Mode: Page (Y)",
     .mode_label_strip = "Mode: Défilement (Y)",
     .page_counter_fmt = "Page %d / %d",
+
+    .end_title_next = "Fin du chapitre",
+    .end_hint_next = "A / R: chapitre suivant   L: rester   B: liste",
+    .end_title_last = "Dernier chapitre terminé",
+    .end_hint_last = "A / R: retour à la liste   L: rester",
 };
 
 static const UIStrings k_strings_en = {
@@ -32,7 +37,7 @@ static const UIStrings k_strings_en = {
     .parent_quit_footer = "B: parent folder   +: quit",
 
     .detail_empty_msg = "This folder is empty.",
-    .detail_footer = "A: open   B: parent folder   Up/Down: navigate   +: quit",
+    .detail_footer = "A: open   X: mark read/unread   B: parent folder   Up/Down: navigate   +: quit",
 
     .progress_done = "Read",
     .progress_in_progress_fmt = "In progress (p. %d/%d)",
@@ -43,6 +48,11 @@ static const UIStrings k_strings_en = {
     .mode_label_page = "Mode: Page (Y)",
     .mode_label_strip = "Mode: Scroll (Y)",
     .page_counter_fmt = "Page %d / %d",
+
+    .end_title_next = "End of chapter",
+    .end_hint_next = "A / R: next chapter   L: stay   B: list",
+    .end_title_last = "Last chapter finished",
+    .end_hint_last = "A / R: back to list   L: stay",
 };
 
 const UIStrings *get_ui_strings(Language lang) {

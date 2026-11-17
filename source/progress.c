@@ -72,3 +72,9 @@ bool progress_save(const char *comic_path, int page, int total) {
     fclose(f);
     return true;
 }
+
+bool progress_clear(const char *comic_path) {
+    char file_path[PROGRESS_PATH_MAX];
+    if (!build_progress_path(comic_path, file_path, sizeof(file_path))) return false;
+    return remove(file_path) == 0;
+}
