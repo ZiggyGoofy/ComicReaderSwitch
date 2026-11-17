@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <dirent.h>
 
 #include "file_browser.h"
 #include "archive.h"
@@ -68,7 +69,8 @@
 
 typedef enum {
     APP_STATE_BROWSER,
-    APP_STATE_READER
+    APP_STATE_READER,
+    APP_STATE_SETTINGS
 } AppState;
 
 typedef enum {
@@ -106,6 +108,14 @@ static void show_error_message(const char *msg) {
 }
 
 static char g_entry_labels[FB_MAX_ENTRIES][40];
+// Compteur "lus/total" affiché sous chaque œuvre de la bibliothèque.
+static char g_entry_counts[FB_MAX_ENTRIES][16];
+static bool g_entry_all_read[FB_MAX_ENTRIES];
+
+// Recherche par titre (vide = pas de filtre) et filtre chaud (0 = désactivé).
+static char g_search_query[64] = "";
+#define WARM_LEVELS 5
+static int g_warm_level = 0;
 static SDL_Texture *g_thumb_textures[FB_MAX_ENTRIES];
 static bool g_thumb_attempted[FB_MAX_ENTRIES];
 
@@ -156,10 +166,55 @@ static void clear_thumbnail_cache(void) {
     g_hero_thumb_index = -1;
 }
 
+// Compte récursivement (profondeur limitée) les chapitres d'une œuvre et
+// ceux déjà lus.
+static void count_series(const char *dir_path, int depth, int *read_count, int *total_count) {
+    if (depth <= 0) return;
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+
+        char path[FB_MAX_PATH];
+        int written = snprintf(path, sizeof(path), "%s/%s", dir_path, ent->d_name);
+        if (written <= 0 || (size_t)written >= sizeof(path)) continue;
+
+        if (ent->d_type == DT_DIR) {
+            count_series(path, depth - 1, read_count, total_count);
+        } else if (fb_is_comic_file(ent->d_name)) {
+            (*total_count)++;
+            int page, total;
+            if (progress_load(path, &page, &total) && total > 0 && page >= total - 1) {
+                (*read_count)++;
+            }
+        }
+    }
+    closedir(dir);
+}
+
 static void refresh_entry_labels(const FileBrowser *fb) {
+    bool at_root = fb_is_at_root(fb);
     for (int i = 0; i < fb->entry_count; i++) {
         g_entry_labels[i][0] = '\0';
-        if (fb->entries[i].is_dir) continue;
+        g_entry_counts[i][0] = '\0';
+        g_entry_all_read[i] = false;
+        if (fb->entries[i].is_dir) {
+            if (at_root) {
+                char dir_path[FB_MAX_PATH];
+                int w = snprintf(dir_path, sizeof(dir_path), "%s/%s", fb->base_path, fb->entries[i].name);
+                if (w > 0 && (size_t)w < sizeof(dir_path)) {
+                    int read_count = 0, total_count = 0;
+                    count_series(dir_path, 3, &read_count, &total_count);
+                    if (total_count > 0) {
+                        snprintf(g_entry_counts[i], sizeof(g_entry_counts[i]), "%d/%d", read_count, total_count);
+                        g_entry_all_read[i] = (read_count == total_count);
+                    }
+                }
+            }
+            continue;
+        }
 
         char full_path[FB_MAX_PATH];
         int written = snprintf(full_path, sizeof(full_path), "%s/%s",
@@ -178,9 +233,42 @@ static void refresh_entry_labels(const FileBrowser *fb) {
     }
 }
 
-static void on_directory_changed(const FileBrowser *fb) {
+static void on_directory_changed(FileBrowser *fb) {
+    // À la racine, on applique la recherche en cours (le scan vient de tout
+    // remettre dans la liste).
+    if (fb_is_at_root(fb) && g_search_query[0] != '\0') {
+        fb_filter(fb, g_search_query);
+    }
     clear_thumbnail_cache();
     refresh_entry_labels(fb);
+}
+
+// Rescanne la racine puis réapplique la recherche (après modification ou
+// effacement de la requête).
+static void rescan_library(FileBrowser *fb) {
+    fb_scan(fb);
+    on_directory_changed(fb);
+}
+
+// Ouvre le clavier système pour saisir la recherche. Retourne true si la
+// requête a été modifiée.
+static bool prompt_search(void) {
+    SwkbdConfig kbd;
+    if (R_FAILED(swkbdCreate(&kbd, 0))) return false;
+
+    swkbdConfigMakePresetDefault(&kbd);
+    swkbdConfigSetHeaderText(&kbd, UI->search_header);
+    swkbdConfigSetInitialText(&kbd, g_search_query);
+    swkbdConfigSetStringLenMax(&kbd, sizeof(g_search_query) - 1);
+
+    char out[sizeof(g_search_query)] = "";
+    Result rc = swkbdShow(&kbd, out, sizeof(out));
+    swkbdClose(&kbd);
+    if (R_FAILED(rc)) return false;
+
+    strncpy(g_search_query, out, sizeof(g_search_query) - 1);
+    g_search_query[sizeof(g_search_query) - 1] = '\0';
+    return true;
 }
 
 // Après être entré dans un dossier, sélectionne automatiquement le premier
@@ -312,6 +400,15 @@ static void render_sidebar(SDL_Renderer *renderer) {
     draw_rect(renderer, 0, menu_y - 8, SIDEBAR_W, 44, 40, 40, 58, 255);
     draw_rect(renderer, 0, menu_y - 8, 4, 44, 255, 210, 90, 255);
     draw_text(renderer, UI->menu_library, 28, menu_y, accent);
+
+    if (g_search_query[0] != '\0') {
+        SDL_Color gray = { 150, 150, 160, 255 };
+        char shown[64];
+        truncate_to_width(g_search_query, SIDEBAR_W - 48, shown, sizeof(shown));
+        draw_text(renderer, UI->search_label, 28, 220, gray);
+        draw_text(renderer, shown, 28, 250, accent);
+        draw_text(renderer, UI->search_clear_hint, 28, 285, gray);
+    }
 }
 
 static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
@@ -329,7 +426,8 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
     int content_x = SIDEBAR_W + CONTENT_MARGIN;
 
     if (fb->entry_count == 0) {
-        draw_text(renderer, UI->no_files_msg, content_x, GRID_TOP, gray);
+        draw_text(renderer, g_search_query[0] != '\0' ? UI->search_none : UI->no_files_msg,
+                   content_x, GRID_TOP, gray);
         draw_text(renderer, UI->parent_quit_footer, content_x, SCREEN_H - 34, gray);
         return;
     }
@@ -386,6 +484,10 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
                 SDL_Color badge_color = is_done ? done_color : prog_color;
                 draw_text(renderer, g_entry_labels[index], tile_x,
                            tile_y + GRID_COVER_H + 8 + GRID_TITLE_H - 10, badge_color);
+            } else if (g_entry_counts[index][0] != '\0') {
+                SDL_Color count_color = g_entry_all_read[index] ? done_color : gray;
+                draw_text(renderer, g_entry_counts[index], tile_x,
+                           tile_y + GRID_COVER_H + 8 + GRID_TITLE_H - 10, count_color);
             }
         }
     }
@@ -839,8 +941,70 @@ static void render_end_prompt(SDL_Renderer *renderer, int rw, int rh, bool has_n
     draw_text(renderer, hint, box_x + (box_w - hw) / 2, box_y + 66, white);
 }
 
+// Filtre chaud : multiplie l'écran par une teinte orangée (moins de lumière
+// bleue). Appliqué juste avant l'affichage, donc valable partout.
+static void apply_warm_filter(SDL_Renderer *renderer) {
+    static const Uint8 tint[WARM_LEVELS][3] = {
+        { 255, 255, 255 },
+        { 255, 235, 205 },
+        { 255, 215, 165 },
+        { 255, 195, 125 },
+        { 255, 170,  90 },
+    };
+    if (g_warm_level <= 0 || g_warm_level >= WARM_LEVELS) return;
+
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_MOD);
+    SDL_SetRenderDrawColor(renderer, tint[g_warm_level][0], tint[g_warm_level][1], tint[g_warm_level][2], 255);
+    SDL_RenderFillRect(renderer, NULL);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+}
+
+#define SETTINGS_ITEM_COUNT 2
+
+static void render_settings(SDL_Renderer *renderer, const char *comics_dir, int selected) {
+    SDL_SetRenderDrawColor(renderer, 20, 20, 28, 255);
+    SDL_RenderClear(renderer);
+
+    SDL_Color white  = { 235, 235, 235, 255 };
+    SDL_Color gray   = { 150, 150, 160, 255 };
+    SDL_Color accent = { 255, 210, 90, 255 };
+
+    draw_text_ex(renderer, g_font_title, UI->settings_title, 60, 40, white);
+
+    for (int i = 0; i < SETTINGS_ITEM_COUNT; i++) {
+        int y = 140 + i * 110;
+        bool is_sel = (i == selected);
+        draw_rect(renderer, 40, y - 10, SCREEN_W - 80, 90, is_sel ? 50 : 32, is_sel ? 50 : 32, is_sel ? 75 : 44, 255);
+        if (is_sel) draw_rect(renderer, 40, y - 10, 5, 90, 255, 210, 90, 255);
+
+        const char *label = (i == 0) ? UI->settings_dir_label : UI->settings_filter_label;
+        draw_text(renderer, label, 70, y, is_sel ? accent : white);
+
+        if (i == 0) {
+            char shown[200];
+            truncate_to_width(comics_dir, SCREEN_W - 180, shown, sizeof(shown));
+            draw_text(renderer, shown, 70, y + 38, gray);
+        } else if (g_warm_level == 0) {
+            draw_text(renderer, UI->settings_filter_off, 70, y + 38, gray);
+        } else {
+            char value[48];
+            snprintf(value, sizeof(value), UI->settings_filter_fmt, g_warm_level, WARM_LEVELS - 1);
+            draw_text(renderer, value, 70, y + 38, gray);
+
+            // Petite jauge à blocs pour visualiser le niveau.
+            for (int k = 1; k < WARM_LEVELS; k++) {
+                int bx = SCREEN_W - 80 - (WARM_LEVELS - k) * 40;
+                if (k <= g_warm_level) draw_rect(renderer, bx, y + 36, 30, 22, 255, 210, 90, 255);
+                else draw_rect(renderer, bx, y + 36, 30, 22, 70, 70, 85, 255);
+            }
+        }
+    }
+
+    draw_text(renderer, UI->settings_footer, 40, SCREEN_H - 40, gray);
+}
+
 static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
-                               char *out_path, size_t out_size) {
+                               char *out_path, size_t out_size, bool allow_cancel) {
     FileBrowser picker;
     if (!fb_init(&picker, "/")) {
         strncpy(out_path, "/", out_size - 1);
@@ -848,7 +1012,9 @@ static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
         return true;
     }
 
-    bool prev_up = false, prev_down = false, prev_a = false, prev_b = false, prev_plus = false;
+    // Les boutons sont considérés comme déjà enfoncés au départ : sinon l'appui
+    // qui a ouvert le sélecteur (A dans les réglages) serait pris pour un clic.
+    bool prev_up = true, prev_down = true, prev_a = true, prev_b = true, prev_plus = true, prev_minus = true;
     bool running = true;
     bool confirmed = false;
 
@@ -858,7 +1024,7 @@ static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
             if (event.type == SDL_QUIT) running = false;
         }
 
-        bool up = false, down = false, a = false, b = false, plus = false;
+        bool up = false, down = false, a = false, b = false, plus = false, minus = false;
         if (pad) {
             up   = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP)
                 || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) < -16000;
@@ -867,6 +1033,7 @@ static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
             a    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B);
             b    = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A);
             plus = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
+            minus = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK);
         }
 
         if (up && !prev_up) fb_move_selection(&picker, -1);
@@ -884,8 +1051,11 @@ static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
             confirmed = true;
             running = false;
         }
+        if (allow_cancel && minus && !prev_minus) {
+            running = false;
+        }
 
-        prev_up = up; prev_down = down; prev_a = a; prev_b = b; prev_plus = plus;
+        prev_up = up; prev_down = down; prev_a = a; prev_b = b; prev_plus = plus; prev_minus = minus;
 
         SDL_SetRenderDrawColor(renderer, 20, 20, 28, 255);
         SDL_RenderClear(renderer);
@@ -894,7 +1064,7 @@ static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
         SDL_Color gray   = { 150, 150, 160, 255 };
         SDL_Color accent = { 255, 210, 90, 255 };
 
-        draw_text_ex(renderer, g_font_title, "Choisis ton dossier de comics", 40, 20, white);
+        draw_text_ex(renderer, g_font_title, UI->picker_title, 40, 20, white);
         draw_text(renderer, picker.base_path, 40, 70, gray);
 
         int row_height = 40;
@@ -922,10 +1092,21 @@ static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
             }
         }
 
-        draw_text(renderer, "A: entrer   B: dossier parent   +: choisir ce dossier",
+        draw_text(renderer, allow_cancel ? UI->picker_footer_cancel : UI->picker_footer,
                    40, SCREEN_H - 40, gray);
 
+        apply_warm_filter(renderer);
         SDL_RenderPresent(renderer);
+    }
+
+    // Attend que "+" soit relâché, sinon l'appui qui valide le dossier serait
+    // lu comme "quitter" par la boucle principale.
+    if (pad) {
+        for (int i = 0; i < 300 && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START); i++) {
+            SDL_Event drain;
+            while (SDL_PollEvent(&drain)) {}
+            SDL_Delay(10);
+        }
     }
 
     if (confirmed) {
@@ -987,7 +1168,7 @@ int main(int argc, char *argv[]) {
 
     char comics_dir[FB_MAX_PATH];
     if (!config_load_comics_dir(comics_dir, sizeof(comics_dir))) {
-        if (!run_folder_picker(renderer, pad, comics_dir, sizeof(comics_dir))) {
+        if (!run_folder_picker(renderer, pad, comics_dir, sizeof(comics_dir), false)) {
             if (pad) SDL_GameControllerClose(pad);
             if (g_font) TTF_CloseFont(g_font);
             if (g_font_title) TTF_CloseFont(g_font_title);
@@ -1001,6 +1182,9 @@ int main(int argc, char *argv[]) {
         }
         config_save_comics_dir(comics_dir);
     }
+
+    g_warm_level = config_load_warm_filter();
+    if (g_warm_level < 0 || g_warm_level >= WARM_LEVELS) g_warm_level = 0;
 
     FileBrowser fb;
     if (!fb_init(&fb, comics_dir)) {
@@ -1024,6 +1208,7 @@ int main(int argc, char *argv[]) {
          prev_minus = false;
 
     bool bar_visible = true;
+    int settings_sel = 0;
     bool end_prompt = false; // invite "chapitre suivant" affichée en fin de chapitre
 
     // Répétition automatique haut/bas dans la liste d'un dossier : compte le
@@ -1362,10 +1547,60 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            if (b && !prev_b) {
-                if (fb_go_parent(&fb)) on_directory_changed(&fb);
+            if (minus_btn && !prev_minus) {
+                state = APP_STATE_SETTINGS;
+                settings_sel = 0;
             }
 
+            // Y : rechercher une œuvre par titre (bibliothèque uniquement).
+            if (at_root && y_btn && !prev_y_btn) {
+                if (prompt_search()) {
+                    rescan_library(&fb);
+                } else {
+                    show_error_message(UI->search_unavailable);
+                }
+            }
+
+            if (b && !prev_b) {
+                if (at_root && g_search_query[0] != '\0') {
+                    g_search_query[0] = '\0';
+                    rescan_library(&fb);
+                } else if (fb_go_parent(&fb)) {
+                    on_directory_changed(&fb);
+                }
+            }
+
+        } else if (state == APP_STATE_SETTINGS) {
+            if (up && !prev_up && settings_sel > 0) settings_sel--;
+            if (down && !prev_down && settings_sel < SETTINGS_ITEM_COUNT - 1) settings_sel++;
+
+            if (settings_sel == 1) {
+                bool changed = false;
+                if (left && !prev_left && g_warm_level > 0) { g_warm_level--; changed = true; }
+                if (right && !prev_right && g_warm_level < WARM_LEVELS - 1) { g_warm_level++; changed = true; }
+                if (a && !prev_a) { g_warm_level = (g_warm_level + 1) % WARM_LEVELS; changed = true; }
+                if (changed) config_save_warm_filter(g_warm_level);
+            }
+
+            if (settings_sel == 0 && a && !prev_a) {
+                char new_dir[FB_MAX_PATH];
+                if (run_folder_picker(renderer, pad, new_dir, sizeof(new_dir), true)) {
+                    if (fb_init(&fb, new_dir)) {
+                        strncpy(comics_dir, new_dir, sizeof(comics_dir) - 1);
+                        comics_dir[sizeof(comics_dir) - 1] = '\0';
+                        config_save_comics_dir(comics_dir);
+                        g_search_query[0] = '\0';
+                    } else {
+                        show_error_message("Impossible d'ouvrir ce dossier");
+                        fb_init(&fb, comics_dir);
+                    }
+                    on_directory_changed(&fb);
+                }
+            }
+
+            if (b && !prev_b) {
+                state = APP_STATE_BROWSER;
+            }
         } else {
             if (y_btn && !prev_y_btn) {
                 end_prompt = false;
@@ -1590,6 +1825,8 @@ int main(int argc, char *argv[]) {
                 draw_text(renderer, g_error_message, box_x + 30, box_y + 13, white);
                 g_error_frames_left--;
             }
+        } else if (state == APP_STATE_SETTINGS) {
+            render_settings(renderer, comics_dir, settings_sel);
         } else {
             if (rotated && canvas_tex) {
                 SDL_SetRenderTarget(renderer, canvas_tex);
@@ -1622,6 +1859,7 @@ int main(int argc, char *argv[]) {
                 if (end_prompt) render_end_prompt(renderer, SCREEN_W, SCREEN_H, find_next_chapter(&fb) >= 0);
             }
         }
+        apply_warm_filter(renderer);
         SDL_RenderPresent(renderer);
     }
 

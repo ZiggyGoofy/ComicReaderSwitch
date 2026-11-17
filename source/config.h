@@ -10,3 +10,7 @@ bool config_load_comics_dir(char *out, size_t out_size);
 
 // Sauvegarde le chemin choisi, pour ne plus jamais redemander à l'utilisateur.
 bool config_save_comics_dir(const char *path);
+
+// Niveau du filtre chaud (0 = désactivé). 0 si rien n'est sauvegardé.
+int config_load_warm_filter(void);
+bool config_save_warm_filter(int level);

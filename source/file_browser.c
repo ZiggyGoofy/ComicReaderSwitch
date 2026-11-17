@@ -12,7 +12,36 @@ static bool has_comic_extension(const char *name) {
     size_t len = strlen(name);
     if (len < 4) return false;
     const char *ext = name + len - 4;
-    return strcasecmp(ext, ".cbz") == 0 || strcasecmp(ext, ".cbr") == 0;
+    return strcasecmp(ext, ".cbz") == 0 || strcasecmp(ext, ".cbr") == 0
+        || strcasecmp(ext, ".zip") == 0 || strcasecmp(ext, ".rar") == 0;
+}
+
+bool fb_is_comic_file(const char *name) {
+    return has_comic_extension(name);
+}
+
+// Recherche insensible à la casse d'une sous-chaîne (strcasestr n'est pas
+// garanti disponible partout).
+static bool contains_nocase(const char *haystack, const char *needle) {
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return true;
+    for (const char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, nlen) == 0) return true;
+    }
+    return false;
+}
+
+void fb_filter(FileBrowser *fb, const char *query) {
+    if (!query || query[0] == '\0') return;
+    int kept = 0;
+    for (int i = 0; i < fb->entry_count; i++) {
+        if (contains_nocase(fb->entries[i].name, query)) {
+            if (kept != i) fb->entries[kept] = fb->entries[i];
+            kept++;
+        }
+    }
+    fb->entry_count = kept;
+    fb->selected = 0;
 }
 
 // Comparaison "naturelle" insensible à la casse : les suites de chiffres sont

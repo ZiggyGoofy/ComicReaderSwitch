@@ -53,4 +53,11 @@ bool fb_selected_is_dir(const FileBrowser *fb);
 // "comics" lui-même), false si on est descendu dans un sous-dossier.
 bool fb_is_at_root(const FileBrowser *fb);
 
+// Vrai si le nom de fichier a une extension de comic reconnue (.cbz .cbr .zip .rar).
+bool fb_is_comic_file(const char *name);
+
+// Ne garde que les entrées dont le nom contient `query` (insensible à la casse).
+// Sans effet si query est vide. Remet la sélection à 0.
+void fb_filter(FileBrowser *fb, const char *query);
+
 bool fb_find_representative_comic(const char *dir_path, char *out, size_t outsize, int depth_limit);

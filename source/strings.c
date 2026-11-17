@@ -6,8 +6,8 @@
 static const UIStrings k_strings_fr = {
     .menu_library = "BIBLIOTHÈQUE",
 
-    .no_files_msg = "Aucun fichier .cbz/.cbr ni dossier ici.",
-    .root_footer = "A: ouvrir   B: dossier parent   Stick/D-pad: naviguer   +: quitter",
+    .no_files_msg = "Aucun fichier .cbz/.cbr/.zip/.rar ni dossier ici.",
+    .root_footer = "A: ouvrir   Y: chercher   -: réglages   B: parent   +: quitter",
     .parent_quit_footer = "B: dossier parent   +: quitter",
 
     .detail_empty_msg = "Ce dossier est vide.",
@@ -27,13 +27,28 @@ static const UIStrings k_strings_fr = {
     .end_hint_next = "A / R: chapitre suivant   L: rester   B: liste",
     .end_title_last = "Dernier chapitre terminé",
     .end_hint_last = "A / R: retour à la liste   L: rester",
+
+    .settings_title = "RÉGLAGES",
+    .settings_dir_label = "Dossier des comics",
+    .settings_filter_label = "Filtre chaud",
+    .settings_filter_off = "Désactivé",
+    .settings_filter_fmt = "Niveau %d / %d",
+    .settings_footer = "Haut/Bas: choisir   A: modifier   Gauche/Droite: ajuster   B: retour",
+    .picker_title = "Choisis ton dossier de comics",
+    .picker_footer = "A: entrer   B: dossier parent   +: choisir ce dossier",
+    .picker_footer_cancel = "A: entrer   B: parent   +: choisir ce dossier   -: annuler",
+    .search_header = "Rechercher une œuvre",
+    .search_label = "Recherche",
+    .search_clear_hint = "B: effacer",
+    .search_none = "Aucun résultat pour cette recherche.",
+    .search_unavailable = "Clavier indisponible dans ce mode de lancement.",
 };
 
 static const UIStrings k_strings_en = {
     .menu_library = "LIBRARY",
 
-    .no_files_msg = "No .cbz/.cbr files or folders here.",
-    .root_footer = "A: open   B: parent folder   Stick/D-pad: navigate   +: quit",
+    .no_files_msg = "No .cbz/.cbr/.zip/.rar files or folders here.",
+    .root_footer = "A: open   Y: search   -: settings   B: parent   +: quit",
     .parent_quit_footer = "B: parent folder   +: quit",
 
     .detail_empty_msg = "This folder is empty.",
@@ -53,6 +68,21 @@ static const UIStrings k_strings_en = {
     .end_hint_next = "A / R: next chapter   L: stay   B: list",
     .end_title_last = "Last chapter finished",
     .end_hint_last = "A / R: back to list   L: stay",
+
+    .settings_title = "SETTINGS",
+    .settings_dir_label = "Comics folder",
+    .settings_filter_label = "Warm filter",
+    .settings_filter_off = "Off",
+    .settings_filter_fmt = "Level %d / %d",
+    .settings_footer = "Up/Down: select   A: change   Left/Right: adjust   B: back",
+    .picker_title = "Choose your comics folder",
+    .picker_footer = "A: enter   B: parent folder   +: pick this folder",
+    .picker_footer_cancel = "A: enter   B: parent   +: pick this folder   -: cancel",
+    .search_header = "Search a series",
+    .search_label = "Search",
+    .search_clear_hint = "B: clear",
+    .search_none = "No results for this search.",
+    .search_unavailable = "Keyboard unavailable in this launch mode.",
 };
 
 const UIStrings *get_ui_strings(Language lang) {

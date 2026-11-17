@@ -32,6 +32,21 @@ typedef struct {
     const char *end_hint_next;
     const char *end_title_last;     // fin du dernier chapitre
     const char *end_hint_last;
+
+    const char *settings_title;
+    const char *settings_dir_label;
+    const char *settings_filter_label;
+    const char *settings_filter_off;
+    const char *settings_filter_fmt;   // "Niveau %d / %d"
+    const char *settings_footer;
+    const char *picker_title;
+    const char *picker_footer;
+    const char *picker_footer_cancel;
+    const char *search_header;
+    const char *search_label;          // "Recherche"
+    const char *search_clear_hint;
+    const char *search_none;
+    const char *search_unavailable;
 } UIStrings;
 
 // Détecte la langue configurée sur la console (français ou anglais par
