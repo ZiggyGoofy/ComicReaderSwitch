@@ -401,13 +401,20 @@ static void render_sidebar(SDL_Renderer *renderer) {
     draw_rect(renderer, 0, menu_y - 8, 4, 44, 255, 210, 90, 255);
     draw_text(renderer, UI->menu_library, 28, menu_y, accent);
 
+    // Légende des touches, sous le titre du menu.
+    SDL_Color gray = { 150, 150, 160, 255 };
+    const char *legend[] = { UI->legend_open, UI->legend_search, UI->legend_settings,
+                             UI->legend_back, UI->legend_quit };
+    for (int i = 0; i < 5; i++) {
+        draw_text(renderer, legend[i], 28, 200 + i * 34, gray);
+    }
+
     if (g_search_query[0] != '\0') {
-        SDL_Color gray = { 150, 150, 160, 255 };
         char shown[64];
         truncate_to_width(g_search_query, SIDEBAR_W - 48, shown, sizeof(shown));
-        draw_text(renderer, UI->search_label, 28, 220, gray);
-        draw_text(renderer, shown, 28, 250, accent);
-        draw_text(renderer, UI->search_clear_hint, 28, 285, gray);
+        draw_text(renderer, UI->search_label, 28, 400, gray);
+        draw_text(renderer, shown, 28, 432, accent);
+        draw_text(renderer, UI->search_clear_hint, 28, 466, gray);
     }
 }
 
@@ -492,8 +499,6 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
         }
     }
 
-    draw_text(renderer, UI->root_footer,
-               content_x, SCREEN_H - 34, gray);
 }
 
 static void render_folder_detail(SDL_Renderer *renderer, const FileBrowser *fb) {

@@ -42,6 +42,12 @@ static const UIStrings k_strings_fr = {
     .search_clear_hint = "B: effacer",
     .search_none = "Aucun résultat pour cette recherche.",
     .search_unavailable = "Clavier indisponible dans ce mode de lancement.",
+
+    .legend_open = "A : ouvrir",
+    .legend_search = "Y : chercher",
+    .legend_settings = "- : réglages",
+    .legend_back = "B : dossier parent",
+    .legend_quit = "+ : quitter",
 };
 
 static const UIStrings k_strings_en = {
@@ -83,6 +89,12 @@ static const UIStrings k_strings_en = {
     .search_clear_hint = "B: clear",
     .search_none = "No results for this search.",
     .search_unavailable = "Keyboard unavailable in this launch mode.",
+
+    .legend_open = "A: open",
+    .legend_search = "Y: search",
+    .legend_settings = "-: settings",
+    .legend_back = "B: parent folder",
+    .legend_quit = "+: quit",
 };
 
 const UIStrings *get_ui_strings(Language lang) {

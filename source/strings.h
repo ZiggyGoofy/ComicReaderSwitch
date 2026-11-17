@@ -47,6 +47,13 @@ typedef struct {
     const char *search_clear_hint;
     const char *search_none;
     const char *search_unavailable;
+
+    // Légende des touches (bibliothèque), une ligne par touche.
+    const char *legend_open;
+    const char *legend_search;
+    const char *legend_settings;
+    const char *legend_back;
+    const char *legend_quit;
 } UIStrings;
 
 // Détecte la langue configurée sur la console (français ou anglais par
