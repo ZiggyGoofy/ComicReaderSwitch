@@ -1109,7 +1109,13 @@ int main(int argc, char *argv[]) {
                                      && touch_x >= MODE_BUTTON_X && touch_x <= MODE_BUTTON_X + MODE_BUTTON_W
                                      && touch_y >= mode_button_y_now && touch_y <= mode_button_y_now + MODE_BUTTON_H;
 
-                if (is_down && !hit_mode_button) {
+                // Toucher la barre de progression (pour la faire glisser) ne doit
+                // pas la cacher ; tout autre appui la masque.
+                bool touching_bar = was_bar_visible && is_down
+                                 && read_mode == READ_MODE_PAGE
+                                 && ar.page_count > 0
+                                 && touch_y >= bar_top_y_now;
+                if (is_down && !hit_mode_button && !touching_bar) {
                     bar_visible = false;
                 }
 
