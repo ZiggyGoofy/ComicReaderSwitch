@@ -112,6 +112,17 @@ static char g_entry_labels[FB_MAX_ENTRIES][40];
 // Compteur "lus/total" affiché sous chaque œuvre de la bibliothèque.
 static char g_entry_counts[FB_MAX_ENTRIES][16];
 static bool g_entry_all_read[FB_MAX_ENTRIES];
+static bool g_entry_count_ready[FB_MAX_ENTRIES];
+
+// Cache des comptages par nom d'œuvre : évite de relire la progression de
+// tous les chapitres à chaque retour à la bibliothèque.
+typedef struct {
+    char name[FB_MAX_NAME];
+    int read_count;
+    int total_count;
+    bool valid;
+} CountCacheEntry;
+static CountCacheEntry g_count_cache[FB_MAX_ENTRIES];
 
 // Recherche par titre (vide = pas de filtre) et filtre chaud (0 = désactivé).
 static char g_search_query[64] = "";
@@ -201,21 +212,8 @@ static void refresh_entry_labels(const FileBrowser *fb) {
         g_entry_labels[i][0] = '\0';
         g_entry_counts[i][0] = '\0';
         g_entry_all_read[i] = false;
-        if (fb->entries[i].is_dir) {
-            if (at_root) {
-                char dir_path[FB_MAX_PATH];
-                int w = snprintf(dir_path, sizeof(dir_path), "%s/%s", fb->base_path, fb->entries[i].name);
-                if (w > 0 && (size_t)w < sizeof(dir_path)) {
-                    int read_count = 0, total_count = 0;
-                    count_series(dir_path, 3, &read_count, &total_count);
-                    if (total_count > 0) {
-                        snprintf(g_entry_counts[i], sizeof(g_entry_counts[i]), "%d/%d", read_count, total_count);
-                        g_entry_all_read[i] = (read_count == total_count);
-                    }
-                }
-            }
-            continue;
-        }
+        g_entry_count_ready[i] = !at_root; // calculé à la demande (voir ensure_count_loaded)
+        if (fb->entries[i].is_dir) continue;
 
         char full_path[FB_MAX_PATH];
         int written = snprintf(full_path, sizeof(full_path), "%s/%s",
@@ -231,6 +229,50 @@ static void refresh_entry_labels(const FileBrowser *fb) {
             snprintf(g_entry_labels[i], sizeof(g_entry_labels[i]),
                      UI->progress_in_progress_fmt, page + 1, total);
         }
+    }
+}
+
+static void invalidate_count_cache(const char *name) {
+    for (int i = 0; i < FB_MAX_ENTRIES; i++) {
+        if (g_count_cache[i].valid && (name == NULL || strcmp(g_count_cache[i].name, name) == 0)) {
+            g_count_cache[i].valid = false;
+        }
+    }
+}
+
+// Calcule (ou récupère du cache) le compteur d'une œuvre, seulement quand
+// elle est affichée à l'écran.
+static void ensure_count_loaded(const FileBrowser *fb, int index) {
+    if (g_entry_count_ready[index]) return;
+    g_entry_count_ready[index] = true;
+    if (!fb->entries[index].is_dir) return;
+
+    int slot = -1, free_slot = -1;
+    for (int i = 0; i < FB_MAX_ENTRIES; i++) {
+        if (g_count_cache[i].valid) {
+            if (strcmp(g_count_cache[i].name, fb->entries[index].name) == 0) { slot = i; break; }
+        } else if (free_slot < 0) {
+            free_slot = i;
+        }
+    }
+
+    if (slot < 0) {
+        char dir_path[FB_MAX_PATH];
+        int w = snprintf(dir_path, sizeof(dir_path), "%s/%s", fb->base_path, fb->entries[index].name);
+        if (w <= 0 || (size_t)w >= sizeof(dir_path)) return;
+
+        slot = (free_slot >= 0) ? free_slot : 0;
+        g_count_cache[slot].read_count = 0;
+        g_count_cache[slot].total_count = 0;
+        count_series(dir_path, 3, &g_count_cache[slot].read_count, &g_count_cache[slot].total_count);
+        snprintf(g_count_cache[slot].name, sizeof(g_count_cache[slot].name), "%s", fb->entries[index].name);
+        g_count_cache[slot].valid = true;
+    }
+
+    int r = g_count_cache[slot].read_count, t = g_count_cache[slot].total_count;
+    if (t > 0) {
+        snprintf(g_entry_counts[index], sizeof(g_entry_counts[index]), "%d/%d", r, t);
+        g_entry_all_read[index] = (r == t);
     }
 }
 
@@ -460,6 +502,7 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
             if (index >= fb->entry_count) break;
 
             ensure_thumbnail_loaded(renderer, fb, index);
+            ensure_count_loaded(fb, index);
 
             int tile_x = content_x + col * (GRID_TILE_W + GRID_GAP);
             int tile_y = GRID_TOP + (row - scroll_row) * GRID_ROW_H;
@@ -1495,6 +1538,8 @@ int main(int argc, char *argv[]) {
 
             if (a && !prev_a) {
                 if (fb_selected_is_dir(&fb)) {
+                    // La progression de cette œuvre peut changer : on refera son comptage au retour.
+                    if (at_root) invalidate_count_cache(fb.entries[fb.selected].name);
                     if (fb_enter_selected(&fb)) {
                         on_directory_changed(&fb);
                         select_in_progress_entry(&fb);
@@ -1596,6 +1641,7 @@ int main(int argc, char *argv[]) {
                         comics_dir[sizeof(comics_dir) - 1] = '\0';
                         config_save_comics_dir(comics_dir);
                         g_search_query[0] = '\0';
+                        invalidate_count_cache(NULL);
                     } else {
                         show_error_message("Impossible d'ouvrir ce dossier");
                         fb_init(&fb, comics_dir);
