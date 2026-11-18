@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <dirent.h>
 
 #include "file_browser.h"
@@ -129,7 +130,6 @@ static char g_search_query[64] = "";
 #define WARM_LEVELS 5
 static int g_warm_level = 0;
 static SDL_Texture *g_thumb_textures[FB_MAX_ENTRIES];
-static bool g_thumb_attempted[FB_MAX_ENTRIES];
 
 static SDL_Texture *g_hero_thumb = NULL;
 static int g_hero_thumb_index = -1;
@@ -163,19 +163,125 @@ static int text_width(const char *text) {
     return text_width_ex(g_font, text);
 }
 
-static void clear_thumbnail_cache(void) {
-    for (int i = 0; i < FB_MAX_ENTRIES; i++) {
-        if (g_thumb_textures[i]) {
-            SDL_DestroyTexture(g_thumb_textures[i]);
-            g_thumb_textures[i] = NULL;
+// --- Cache de miniatures -------------------------------------------------
+// Les textures survivent aux changements de dossier : revenir à la
+// bibliothèque ne redécode plus aucune image. Éviction LRU quand le cache est
+// plein ; les échecs (pas de couverture) sont mémorisés eux aussi.
+#define THUMB_CACHE_SIZE 80
+typedef struct {
+    uint64_t key;
+    SDL_Texture *tex;
+    unsigned long last_used;
+    bool valid;
+} ThumbSlot;
+static ThumbSlot g_thumb_cache[THUMB_CACHE_SIZE];
+static unsigned long g_thumb_tick = 0;
+
+// Cache du comic "représentatif" d'un dossier (évite de re-parcourir
+// l'arborescence sur la SD à chaque affichage).
+#define REP_CACHE_SIZE 256
+typedef struct {
+    uint64_t key;
+    char path[FB_MAX_PATH];
+    bool found;
+    bool valid;
+} RepSlot;
+static RepSlot g_rep_cache[REP_CACHE_SIZE];
+static int g_rep_next = 0;
+
+static uint64_t fnv_hash(const char *str, uint64_t seed) {
+    uint64_t h = 1469598103934665603ULL ^ seed;
+    for (; *str; str++) {
+        h ^= (unsigned char)*str;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static bool find_representative_cached(const char *dir_path, char *out, size_t out_size) {
+    uint64_t key = fnv_hash(dir_path, 0);
+    for (int i = 0; i < REP_CACHE_SIZE; i++) {
+        if (g_rep_cache[i].valid && g_rep_cache[i].key == key) {
+            if (!g_rep_cache[i].found) return false;
+            snprintf(out, out_size, "%s", g_rep_cache[i].path);
+            return true;
         }
-        g_thumb_attempted[i] = false;
     }
-    if (g_hero_thumb) {
-        SDL_DestroyTexture(g_hero_thumb);
-        g_hero_thumb = NULL;
+
+    RepSlot *slot = &g_rep_cache[g_rep_next];
+    g_rep_next = (g_rep_next + 1) % REP_CACHE_SIZE;
+    slot->key = key;
+    slot->valid = true;
+    slot->found = fb_find_representative_comic(dir_path, slot->path, sizeof(slot->path), 6);
+    if (!slot->found) return false;
+    snprintf(out, out_size, "%s", slot->path);
+    return true;
+}
+
+static SDL_Texture *thumb_cache_get(SDL_Renderer *renderer, const char *full_path, bool is_dir,
+                                     int w, int h) {
+    uint64_t key = fnv_hash(full_path, ((uint64_t)w << 32) | (uint64_t)h);
+
+    int victim = -1;
+    unsigned long oldest = (unsigned long)-1;
+    for (int i = 0; i < THUMB_CACHE_SIZE; i++) {
+        if (g_thumb_cache[i].valid) {
+            if (g_thumb_cache[i].key == key) {
+                g_thumb_cache[i].last_used = ++g_thumb_tick;
+                return g_thumb_cache[i].tex;
+            }
+            if (g_thumb_cache[i].last_used < oldest) {
+                oldest = g_thumb_cache[i].last_used;
+                victim = i;
+            }
+        } else if (victim < 0 || g_thumb_cache[victim].valid) {
+            victim = i;
+        }
     }
+
+    SDL_Texture *tex = NULL;
+    if (is_dir) {
+        char representative[FB_MAX_PATH];
+        if (find_representative_cached(full_path, representative, sizeof(representative))) {
+            tex = thumbnail_get(renderer, full_path, representative, w, h);
+        }
+    } else {
+        tex = thumbnail_get(renderer, full_path, full_path, w, h);
+    }
+
+    if (victim >= 0) {
+        if (g_thumb_cache[victim].valid && g_thumb_cache[victim].tex) {
+            SDL_DestroyTexture(g_thumb_cache[victim].tex);
+        }
+        g_thumb_cache[victim].key = key;
+        g_thumb_cache[victim].tex = tex;
+        g_thumb_cache[victim].last_used = ++g_thumb_tick;
+        g_thumb_cache[victim].valid = true;
+    }
+    return tex;
+}
+
+// Oublie les références aux miniatures de l'écran courant (sans détruire les
+// textures, qui restent dans le cache).
+static void reset_thumbnail_refs(void) {
+    for (int i = 0; i < FB_MAX_ENTRIES; i++) {
+        g_thumb_textures[i] = NULL;
+    }
+    g_hero_thumb = NULL;
     g_hero_thumb_index = -1;
+}
+
+// Vide tout (changement de dossier de comics, fermeture de l'appli).
+static void clear_thumbnail_cache(void) {
+    reset_thumbnail_refs();
+    for (int i = 0; i < THUMB_CACHE_SIZE; i++) {
+        if (g_thumb_cache[i].valid && g_thumb_cache[i].tex) {
+            SDL_DestroyTexture(g_thumb_cache[i].tex);
+        }
+        g_thumb_cache[i].valid = false;
+        g_thumb_cache[i].tex = NULL;
+    }
+    for (int i = 0; i < REP_CACHE_SIZE; i++) g_rep_cache[i].valid = false;
 }
 
 // Compte récursivement (profondeur limitée) les chapitres d'une œuvre et
@@ -282,7 +388,7 @@ static void on_directory_changed(FileBrowser *fb) {
     if (fb_is_at_root(fb) && g_search_query[0] != '\0') {
         fb_filter(fb, g_search_query);
     }
-    clear_thumbnail_cache();
+    reset_thumbnail_refs();
     refresh_entry_labels(fb);
 }
 
@@ -383,35 +489,20 @@ static void truncate_to_width(const char *text, int max_w, char *out, size_t out
 }
 
 static void ensure_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *fb, int index) {
-    if (g_thumb_attempted[index]) return;
-    g_thumb_attempted[index] = true;
-
     const FBEntry *e = &fb->entries[index];
     char full_path[FB_MAX_PATH];
     int written = snprintf(full_path, sizeof(full_path), "%s/%s", fb->base_path, e->name);
     if (written <= 0 || (size_t)written >= sizeof(full_path)) return;
 
-    if (e->is_dir) {
-        char representative[FB_MAX_PATH];
-        if (fb_find_representative_comic(full_path, representative, sizeof(representative), 6)) {
-            g_thumb_textures[index] = thumbnail_get(renderer, full_path, representative,
-                                                     GRID_TILE_W, GRID_COVER_H);
-        }
-    } else {
-        g_thumb_textures[index] = thumbnail_get(renderer, full_path, full_path,
-                                                 GRID_TILE_W, GRID_COVER_H);
-    }
+    // Appelé à chaque image : la recherche dans le cache est quasi gratuite,
+    // et ça garde la texture "récemment utilisée" (donc jamais évincée).
+    g_thumb_textures[index] = thumb_cache_get(renderer, full_path, e->is_dir,
+                                              GRID_TILE_W, GRID_COVER_H);
 }
 
 static void ensure_hero_thumbnail_loaded(SDL_Renderer *renderer, const FileBrowser *fb, int index) {
-    if (index == g_hero_thumb_index) return;
-
-    if (g_hero_thumb) {
-        SDL_DestroyTexture(g_hero_thumb);
-        g_hero_thumb = NULL;
-    }
     g_hero_thumb_index = index;
-
+    g_hero_thumb = NULL;
     if (index < 0 || index >= fb->entry_count) return;
 
     const FBEntry *e = &fb->entries[index];
@@ -419,16 +510,7 @@ static void ensure_hero_thumbnail_loaded(SDL_Renderer *renderer, const FileBrows
     int written = snprintf(full_path, sizeof(full_path), "%s/%s", fb->base_path, e->name);
     if (written <= 0 || (size_t)written >= sizeof(full_path)) return;
 
-    if (e->is_dir) {
-        char representative[FB_MAX_PATH];
-        if (fb_find_representative_comic(full_path, representative, sizeof(representative), 6)) {
-            g_hero_thumb = thumbnail_get(renderer, full_path, representative,
-                                          HERO_COVER_W, HERO_COVER_H);
-        }
-    } else {
-        g_hero_thumb = thumbnail_get(renderer, full_path, full_path,
-                                      HERO_COVER_W, HERO_COVER_H);
-    }
+    g_hero_thumb = thumb_cache_get(renderer, full_path, e->is_dir, HERO_COVER_W, HERO_COVER_H);
 }
 
 static void render_sidebar(SDL_Renderer *renderer) {
@@ -1642,6 +1724,7 @@ int main(int argc, char *argv[]) {
                         config_save_comics_dir(comics_dir);
                         g_search_query[0] = '\0';
                         invalidate_count_cache(NULL);
+                        clear_thumbnail_cache();
                     } else {
                         show_error_message("Impossible d'ouvrir ce dossier");
                         fb_init(&fb, comics_dir);
