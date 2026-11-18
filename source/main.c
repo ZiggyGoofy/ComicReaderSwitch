@@ -39,7 +39,7 @@
 
 #define MODE_BUTTON_X (BAR_MARGIN + 200)
 #define MODE_BUTTON_Y(rh) (BAR_TOP_Y(rh) + 6)
-#define MODE_BUTTON_W 200
+#define MODE_BUTTON_W 260
 #define MODE_BUTTON_H 28
 
 // --- Canevas portrait utilisé quand la lecture est tournée à 90° ---
@@ -73,7 +73,8 @@
 typedef enum {
     APP_STATE_BROWSER,
     APP_STATE_READER,
-    APP_STATE_SETTINGS
+    APP_STATE_SETTINGS,
+    APP_STATE_CONTROLS
 } AppState;
 
 typedef enum {
@@ -1005,9 +1006,14 @@ static void render_reader_bar(SDL_Renderer *renderer, int page_index, int page_c
     draw_text(renderer, mode_label, MODE_BUTTON_X + (MODE_BUTTON_W - mode_label_w) / 2,
                mode_button_y + 5, accent);
 
+    // L'aide à droite n'a pas la place en portrait (720 px) : elle recouvrirait
+    // le compteur et le bouton de mode. Toutes les touches sont dans Réglages > Touches.
     const char *hint = (mode == READ_MODE_PAGE) ? UI->reader_hint_page : UI->reader_hint_strip;
     int hint_w = text_width(hint);
-    draw_text(renderer, hint, rw - BAR_MARGIN - hint_w, bar_top_y + 8, gray);
+    int hint_x = rw - BAR_MARGIN - hint_w;
+    if (hint_x >= MODE_BUTTON_X + MODE_BUTTON_W + 20) {
+        draw_text(renderer, hint, hint_x, bar_top_y + 8, gray);
+    }
 
     int track_left = BAR_MARGIN;
     int track_right = rw - BAR_MARGIN;
@@ -1188,7 +1194,7 @@ static void apply_warm_filter(SDL_Renderer *renderer) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 }
 
-#define SETTINGS_ITEM_COUNT 2
+#define SETTINGS_ITEM_COUNT 3
 
 static void render_settings(SDL_Renderer *renderer, const char *comics_dir, int selected) {
     SDL_SetRenderDrawColor(renderer, 20, 20, 28, 255);
@@ -1206,10 +1212,14 @@ static void render_settings(SDL_Renderer *renderer, const char *comics_dir, int 
         draw_rect(renderer, 40, y - 10, SCREEN_W - 80, 90, is_sel ? 50 : 32, is_sel ? 50 : 32, is_sel ? 75 : 44, 255);
         if (is_sel) draw_rect(renderer, 40, y - 10, 5, 90, 255, 210, 90, 255);
 
-        const char *label = (i == 0) ? UI->settings_dir_label : UI->settings_filter_label;
+        const char *label = (i == 0) ? UI->settings_dir_label
+                          : (i == 1) ? UI->settings_filter_label
+                          : UI->settings_controls_label;
         draw_text(renderer, label, 70, y, is_sel ? accent : white);
 
-        if (i == 0) {
+        if (i == 2) {
+            draw_text(renderer, UI->settings_controls_hint, 70, y + 38, gray);
+        } else if (i == 0) {
             char shown[200];
             truncate_to_width(comics_dir, SCREEN_W - 180, shown, sizeof(shown));
             draw_text(renderer, shown, 70, y + 38, gray);
@@ -1230,6 +1240,38 @@ static void render_settings(SDL_Renderer *renderer, const char *comics_dir, int 
     }
 
     draw_text(renderer, UI->settings_footer, 40, SCREEN_H - 40, gray);
+}
+
+static void render_controls(SDL_Renderer *renderer) {
+    SDL_SetRenderDrawColor(renderer, 20, 20, 28, 255);
+    SDL_RenderClear(renderer);
+
+    SDL_Color white  = { 235, 235, 235, 255 };
+    SDL_Color gray   = { 150, 150, 160, 255 };
+    SDL_Color accent = { 255, 210, 90, 255 };
+
+    draw_text_ex(renderer, g_font_title, UI->controls_title, 60, 30, white);
+
+    // Deux colonnes ; "\f" dans la liste passe à la colonne suivante.
+    int col = 0;
+    int y = 110;
+    for (int i = 0; i < UI->controls_line_count; i++) {
+        const char *line = UI->controls_lines[i];
+        if (line[0] == '\f') { col++; y = 110; continue; }
+
+        int x = 60 + col * 600;
+        if (line[0] == '#') {
+            if (y > 110) y += 14;
+            draw_text(renderer, line + 1, x, y, accent);
+            draw_rect(renderer, x, y + 30, 520, 2, 90, 80, 40, 255);
+            y += 40;
+        } else {
+            draw_text(renderer, line, x + 10, y, white);
+            y += 30;
+        }
+    }
+
+    draw_text(renderer, UI->controls_footer, 60, SCREEN_H - 40, gray);
 }
 
 static bool run_folder_picker(SDL_Renderer *renderer, SDL_GameController *pad,
@@ -1843,8 +1885,16 @@ int main(int argc, char *argv[]) {
                 }
             }
 
+            if (settings_sel == 2 && a && !prev_a) {
+                state = APP_STATE_CONTROLS;
+            }
+
             if (b && !prev_b) {
                 state = APP_STATE_BROWSER;
+            }
+        } else if (state == APP_STATE_CONTROLS) {
+            if (b && !prev_b) {
+                state = APP_STATE_SETTINGS;
             }
         } else {
             if (y_btn && !prev_y_btn) {
@@ -2072,6 +2122,8 @@ int main(int argc, char *argv[]) {
             }
         } else if (state == APP_STATE_SETTINGS) {
             render_settings(renderer, comics_dir, settings_sel);
+        } else if (state == APP_STATE_CONTROLS) {
+            render_controls(renderer);
         } else {
             if (rotated && canvas_tex) {
                 SDL_SetRenderTarget(renderer, canvas_tex);

@@ -55,6 +55,15 @@ typedef struct {
     const char *legend_back;
     const char *legend_quit;
     const char *legend_pin;
+
+    // Écran "Touches" des réglages. Dans controls_lines : "#Titre" = en-tête
+    // de section, "\f" = passer à la colonne suivante, sinon une ligne de texte.
+    const char *settings_controls_label;
+    const char *settings_controls_hint;
+    const char *controls_title;
+    const char *controls_footer;
+    const char *const *controls_lines;
+    int controls_line_count;
 } UIStrings;
 
 // Détecte la langue configurée sur la console (français ou anglais par
