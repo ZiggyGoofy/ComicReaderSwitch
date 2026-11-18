@@ -124,6 +124,7 @@ typedef struct {
     int read_count;
     int total_count;
     bool valid;
+    bool verified; // recompté pendant cette session (sinon : valeur lue sur la SD)
 } CountCacheEntry;
 static CountCacheEntry g_count_cache[FB_MAX_ENTRIES];
 
@@ -377,42 +378,146 @@ static void invalidate_count_cache(const char *name) {
     }
 }
 
-// Calcule (ou récupère du cache) le compteur d'une œuvre, seulement quand
-// elle est affichée à l'écran.
-static void ensure_count_loaded(const FileBrowser *fb, int index) {
-    if (g_entry_count_ready[index]) return;
-    if (!fb->entries[index].is_dir) { g_entry_count_ready[index] = true; return; }
+// --- Compteurs sauvegardés sur la SD -------------------------------------
+// Les "lus/total" sont écrits dans counts.txt et rechargés au lancement : ils
+// s'affichent donc immédiatement. Ils sont ensuite revérifiés (recomptés) en
+// arrière-plan pour les œuvres affichées, au cas où un chapitre aurait été
+// ajouté, supprimé ou lu entre-temps. Ce fichier ne contient que ces totaux :
+// la progression de lecture elle-même est dans le dossier progress/.
+#define COUNTS_PATH "/switch/ComicReaderSwitch/counts.txt"
+static bool g_counts_dirty = false;
+static Uint32 g_counts_last_save = 0;
 
-    int slot = -1, free_slot = -1;
+static void counts_load(const char *comics_root) {
+    FILE *f = fopen(COUNTS_PATH, "r");
+    if (!f) return;
+
+    char line[FB_MAX_NAME + 64];
+    // 1re ligne : dossier auquel se rapportent ces compteurs.
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return; }
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+    if (strncmp(line, "root=", 5) != 0 || strcmp(line + 5, comics_root) != 0) { fclose(f); return; }
+
+    int n = 0;
+    while (n < FB_MAX_ENTRIES && fgets(line, sizeof(line), f)) {
+        len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+
+        int r = 0, t = 0, consumed = 0;
+        if (sscanf(line, "%d\t%d\t%n", &r, &t, &consumed) < 2 || consumed <= 0) continue;
+        if (line[consumed] == '\0' || t <= 0 || r < 0 || r > t) continue;
+
+        CountCacheEntry *e = &g_count_cache[n++];
+        snprintf(e->name, sizeof(e->name), "%s", line + consumed);
+        e->read_count = r;
+        e->total_count = t;
+        e->valid = true;
+        e->verified = false;
+    }
+    fclose(f);
+}
+
+static void counts_save(const char *comics_root) {
+    FILE *f = fopen(COUNTS_PATH, "w");
+    if (!f) return;
+    fprintf(f, "root=%s\n", comics_root);
     for (int i = 0; i < FB_MAX_ENTRIES; i++) {
-        if (g_count_cache[i].valid) {
-            if (strcmp(g_count_cache[i].name, fb->entries[index].name) == 0) { slot = i; break; }
-        } else if (free_slot < 0) {
-            free_slot = i;
+        if (g_count_cache[i].valid && g_count_cache[i].total_count > 0) {
+            fprintf(f, "%d\t%d\t%s\n", g_count_cache[i].read_count, g_count_cache[i].total_count,
+                    g_count_cache[i].name);
         }
     }
+    fclose(f);
+    g_counts_dirty = false;
+    g_counts_last_save = SDL_GetTicks();
+}
 
-    if (slot < 0) {
-        if (g_frame_count_loads >= FRAME_COUNT_LOAD_BUDGET) return; // réessaiera à l'image suivante
-        g_frame_count_loads++;
+// Écrit le fichier s'il y a du nouveau, au plus toutes les 3 s (ou tout de
+// suite avec force=true, par ex. à la fermeture).
+static void counts_save_if_needed(const char *comics_root, bool force) {
+    if (!g_counts_dirty) return;
+    if (!force && SDL_GetTicks() - g_counts_last_save < 3000) return;
+    counts_save(comics_root);
+}
 
-        char dir_path[FB_MAX_PATH];
-        int w = snprintf(dir_path, sizeof(dir_path), "%s/%s", fb->base_path, fb->entries[index].name);
-        if (w <= 0 || (size_t)w >= sizeof(dir_path)) { g_entry_count_ready[index] = true; return; }
-
-        slot = (free_slot >= 0) ? free_slot : 0;
-        g_count_cache[slot].read_count = 0;
-        g_count_cache[slot].total_count = 0;
-        count_series(dir_path, 3, &g_count_cache[slot].read_count, &g_count_cache[slot].total_count);
-        snprintf(g_count_cache[slot].name, sizeof(g_count_cache[slot].name), "%s", fb->entries[index].name);
-        g_count_cache[slot].valid = true;
+static int count_cache_find(const char *name) {
+    for (int i = 0; i < FB_MAX_ENTRIES; i++) {
+        if (g_count_cache[i].valid && strcmp(g_count_cache[i].name, name) == 0) return i;
     }
+    return -1;
+}
 
-    g_entry_count_ready[index] = true;
+static void fill_count_strings(int index, int slot) {
+    g_entry_counts[index][0] = '\0';
+    g_entry_all_read[index] = false;
     int r = g_count_cache[slot].read_count, t = g_count_cache[slot].total_count;
     if (t > 0) {
         snprintf(g_entry_counts[index], sizeof(g_entry_counts[index]), "%d/%d", r, t);
         g_entry_all_read[index] = (r == t);
+    }
+}
+
+// Recompte une œuvre dans le slot donné (ou un slot libre si slot < 0).
+// Retourne le slot utilisé, ou -1 en cas d'échec.
+static int recount_series(const FileBrowser *fb, int index, int slot) {
+    char dir_path[FB_MAX_PATH];
+    int w = snprintf(dir_path, sizeof(dir_path), "%s/%s", fb->base_path, fb->entries[index].name);
+    if (w <= 0 || (size_t)w >= sizeof(dir_path)) return -1;
+
+    if (slot < 0) {
+        for (int i = 0; i < FB_MAX_ENTRIES; i++) {
+            if (!g_count_cache[i].valid) { slot = i; break; }
+        }
+        if (slot < 0) slot = 0;
+    }
+
+    int r = 0, t = 0;
+    count_series(dir_path, 3, &r, &t);
+
+    bool changed = !g_count_cache[slot].valid || g_count_cache[slot].read_count != r
+                || g_count_cache[slot].total_count != t
+                || strcmp(g_count_cache[slot].name, fb->entries[index].name) != 0;
+    snprintf(g_count_cache[slot].name, sizeof(g_count_cache[slot].name), "%s", fb->entries[index].name);
+    g_count_cache[slot].read_count = r;
+    g_count_cache[slot].total_count = t;
+    g_count_cache[slot].valid = true;
+    g_count_cache[slot].verified = true;
+    if (changed) g_counts_dirty = true;
+    return slot;
+}
+
+// Affiche le compteur d'une œuvre : valeur en cache (SD ou session) tout de
+// suite si elle existe, sinon comptage (un par image au maximum).
+static void ensure_count_loaded(const FileBrowser *fb, int index) {
+    if (g_entry_count_ready[index]) return;
+    if (!fb->entries[index].is_dir) { g_entry_count_ready[index] = true; return; }
+
+    int slot = count_cache_find(fb->entries[index].name);
+    if (slot < 0) {
+        if (g_frame_count_loads >= FRAME_COUNT_LOAD_BUDGET) return; // réessaiera à l'image suivante
+        g_frame_count_loads++;
+        slot = recount_series(fb, index, -1);
+        if (slot < 0) { g_entry_count_ready[index] = true; return; }
+    }
+
+    g_entry_count_ready[index] = true;
+    fill_count_strings(index, slot);
+}
+
+// Revérifie (un recomptage par image au maximum) les œuvres affichées dont le
+// compteur vient seulement du fichier sur la SD.
+static void verify_visible_counts(const FileBrowser *fb, int first, int last) {
+    if (g_frame_count_loads >= FRAME_COUNT_LOAD_BUDGET) return;
+    for (int idx = first; idx < last && idx < fb->entry_count; idx++) {
+        if (idx < 0 || !fb->entries[idx].is_dir) continue;
+        int slot = count_cache_find(fb->entries[idx].name);
+        if (slot < 0 || g_count_cache[slot].verified) continue;
+
+        g_frame_count_loads++;
+        slot = recount_series(fb, idx, slot);
+        if (slot >= 0) fill_count_strings(idx, slot);
+        return;
     }
 }
 
@@ -739,6 +844,8 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
             }
         }
     }
+
+    verify_visible_counts(fb, scroll_row * GRID_COLS, (scroll_row + visible_rows) * GRID_COLS);
 
     // Préchargement : quand les cases visibles sont prêtes, on prépare (une par
     // image) les rangées voisines pour que le défilement ne saccade pas.
@@ -1513,6 +1620,7 @@ int main(int argc, char *argv[]) {
     if (!fb_init(&fb, comics_dir)) {
         printf("Impossible d'ouvrir %s — vérifie qu'il existe sur la SD.\n", comics_dir);
     }
+    counts_load(comics_dir);
     on_directory_changed(&fb);
 
     ComicArchive ar;
@@ -1560,6 +1668,7 @@ int main(int argc, char *argv[]) {
         int events_this_frame = 0;
         g_frame_thumb_loads = 0;
         g_frame_count_loads = 0;
+        counts_save_if_needed(comics_dir, false);
         while (SDL_PollEvent(&event)) {
             events_this_frame++;
             if (events_this_frame > 200) break;
@@ -1929,6 +2038,7 @@ int main(int argc, char *argv[]) {
                         config_save_comics_dir(comics_dir);
                         g_search_query[0] = '\0';
                         invalidate_count_cache(NULL);
+                        g_counts_dirty = true;
                         clear_thumbnail_cache();
                     } else {
                         show_error_message("Impossible d'ouvrir ce dossier");
@@ -2213,6 +2323,7 @@ int main(int argc, char *argv[]) {
         SDL_RenderPresent(renderer);
     }
 
+    counts_save_if_needed(comics_dir, true);
     if (page_tex) SDL_DestroyTexture(page_tex);
     if (canvas_tex) SDL_DestroyTexture(canvas_tex);
     strip_clear_all();
