@@ -153,10 +153,26 @@ static bool load_system_font(void) {
     return g_font != NULL;
 }
 
+static uint64_t fnv_hash(const char *str, uint64_t seed);
+
+// Mesure d'un texte, mémorisée : TTF_SizeUTF8 est coûteux et on l'appelait des
+// dizaines de fois par image (troncature des titres, centrage...).
+#define WIDTH_CACHE_SIZE 1024
+typedef struct { uint64_t key; int w; bool valid; } WidthSlot;
+static WidthSlot g_width_cache[WIDTH_CACHE_SIZE];
+
 static int text_width_ex(TTF_Font *font, const char *text) {
     if (!font || !text || !text[0]) return 0;
+
+    uint64_t key = fnv_hash(text, (uint64_t)(uintptr_t)font);
+    WidthSlot *slot = &g_width_cache[key % WIDTH_CACHE_SIZE];
+    if (slot->valid && slot->key == key) return slot->w;
+
     int w = 0, h = 0;
     if (TTF_SizeUTF8(font, text, &w, &h) != 0) return 0;
+    slot->key = key;
+    slot->w = w;
+    slot->valid = true;
     return w;
 }
 
@@ -465,26 +481,69 @@ static void draw_rect_outline(SDL_Renderer *r, int x, int y, int w, int h,
     }
 }
 
+// Cache de textures de texte : sans lui, chaque texte était rasterisé par
+// FreeType puis envoyé au GPU à CHAQUE image (des dizaines de fois par image).
+#define TEXT_CACHE_SIZE 384
+typedef struct {
+    uint64_t key;
+    SDL_Texture *tex;
+    int w, h;
+    unsigned long used;
+    bool valid;
+} TextSlot;
+static TextSlot g_text_cache[TEXT_CACHE_SIZE];
+static unsigned long g_text_tick = 0;
+
 static void draw_text_ex(SDL_Renderer *r, TTF_Font *font, const char *text, int x, int y, SDL_Color color) {
     if (!font || !text || !text[0]) return;
 
-    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, text, color);
-    if (!surf) return;
+    uint64_t color_bits = ((uint64_t)color.r << 24) | ((uint64_t)color.g << 16)
+                        | ((uint64_t)color.b << 8) | (uint64_t)color.a;
+    uint64_t key = fnv_hash(text, ((uint64_t)(uintptr_t)font * 1000003ULL) ^ (color_bits << 20));
 
-    SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
-    if (tex) {
-        SDL_Rect dst = { x, y, surf->w, surf->h };
-        SDL_RenderCopy(r, tex, NULL, &dst);
-        SDL_DestroyTexture(tex);
+    TextSlot *slot = NULL;
+    TextSlot *victim = &g_text_cache[0];
+    for (int i = 0; i < TEXT_CACHE_SIZE; i++) {
+        TextSlot *c = &g_text_cache[i];
+        if (c->valid && c->key == key) { slot = c; break; }
+        if (!c->valid) {
+            if (victim->valid) victim = c;
+        } else if (victim->valid && c->used < victim->used) {
+            victim = c;
+        }
     }
-    SDL_FreeSurface(surf);
+
+    if (!slot) {
+        SDL_Surface *surf = TTF_RenderUTF8_Blended(font, text, color);
+        if (!surf) return;
+        SDL_Texture *tex = SDL_CreateTextureFromSurface(r, surf);
+        int w = surf->w, h = surf->h;
+        SDL_FreeSurface(surf);
+        if (!tex) return;
+
+        if (victim->valid && victim->tex) SDL_DestroyTexture(victim->tex);
+        victim->key = key;
+        victim->tex = tex;
+        victim->w = w;
+        victim->h = h;
+        victim->valid = true;
+        slot = victim;
+    }
+
+    slot->used = ++g_text_tick;
+    SDL_Rect dst = { x, y, slot->w, slot->h };
+    SDL_RenderCopy(r, slot->tex, NULL, &dst);
 }
 
 static void draw_text(SDL_Renderer *r, const char *text, int x, int y, SDL_Color color) {
     draw_text_ex(r, g_font, text, x, y, color);
 }
 
-static void truncate_to_width(const char *text, int max_w, char *out, size_t outsize) {
+#define TRUNC_CACHE_SIZE 512
+typedef struct { uint64_t key; char out[208]; bool valid; } TruncSlot;
+static TruncSlot g_trunc_cache[TRUNC_CACHE_SIZE];
+
+static void truncate_to_width_uncached(const char *text, int max_w, char *out, size_t outsize) {
     strncpy(out, text, outsize - 1);
     out[outsize - 1] = '\0';
 
@@ -501,6 +560,22 @@ static void truncate_to_width(const char *text, int max_w, char *out, size_t out
             out[outsize - 1] = '\0';
             return;
         }
+    }
+}
+
+// Version mémorisée : le résultat ne dépend que du texte et de la largeur.
+static void truncate_to_width(const char *text, int max_w, char *out, size_t outsize) {
+    uint64_t key = fnv_hash(text, (uint64_t)max_w * 131ULL + (uint64_t)outsize);
+    TruncSlot *slot = &g_trunc_cache[key % TRUNC_CACHE_SIZE];
+    if (slot->valid && slot->key == key && outsize <= sizeof(slot->out)) {
+        snprintf(out, outsize, "%s", slot->out);
+        return;
+    }
+    truncate_to_width_uncached(text, max_w, out, outsize);
+    if (outsize <= sizeof(slot->out)) {
+        slot->key = key;
+        snprintf(slot->out, sizeof(slot->out), "%s", out);
+        slot->valid = true;
     }
 }
 
