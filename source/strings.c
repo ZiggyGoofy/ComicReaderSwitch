@@ -110,7 +110,7 @@ static const UIStrings k_strings_fr = {
     .legend_pin = "X : épingler",
 
     .settings_controls_label = "Touches",
-    .settings_controls_hint = "A : afficher toutes les touches",
+    .settings_controls_hint = "Afficher toutes les touches",
     .controls_title = "TOUCHES",
     .controls_footer = "B: retour",
     .controls_lines = k_controls_fr,
@@ -165,7 +165,7 @@ static const UIStrings k_strings_en = {
     .legend_pin = "X: pin",
 
     .settings_controls_label = "Controls",
-    .settings_controls_hint = "A: show all controls",
+    .settings_controls_hint = "Show all controls",
     .controls_title = "CONTROLS",
     .controls_footer = "B: back",
     .controls_lines = k_controls_en,
