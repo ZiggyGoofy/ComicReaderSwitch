@@ -207,6 +207,16 @@ typedef struct {
 static RepSlot g_rep_cache[REP_CACHE_SIZE];
 static int g_rep_next = 0;
 
+// Budget de chargements par image : un chargement qui manque dans le cache
+// (décodage d'un PNG, génération d'une miniature, comptage des chapitres...)
+// peut durer plusieurs dizaines de ms. Au lieu de tous les faire d'un coup
+// pendant une image (saccade), on en fait un par image ; en attendant, la
+// case affiche son emplacement vide et se remplit à l'image suivante.
+#define FRAME_THUMB_LOAD_BUDGET 1
+#define FRAME_COUNT_LOAD_BUDGET 1
+static int g_frame_thumb_loads = 0;
+static int g_frame_count_loads = 0;
+
 static uint64_t fnv_hash(const char *str, uint64_t seed) {
     uint64_t h = 1469598103934665603ULL ^ seed;
     for (; *str; str++) {
@@ -256,6 +266,9 @@ static SDL_Texture *thumb_cache_get(SDL_Renderer *renderer, const char *full_pat
             victim = i;
         }
     }
+
+    if (g_frame_thumb_loads >= FRAME_THUMB_LOAD_BUDGET) return NULL; // pas encore chargé : réessaiera à l'image suivante
+    g_frame_thumb_loads++;
 
     SDL_Texture *tex = NULL;
     if (is_dir) {
@@ -368,8 +381,7 @@ static void invalidate_count_cache(const char *name) {
 // elle est affichée à l'écran.
 static void ensure_count_loaded(const FileBrowser *fb, int index) {
     if (g_entry_count_ready[index]) return;
-    g_entry_count_ready[index] = true;
-    if (!fb->entries[index].is_dir) return;
+    if (!fb->entries[index].is_dir) { g_entry_count_ready[index] = true; return; }
 
     int slot = -1, free_slot = -1;
     for (int i = 0; i < FB_MAX_ENTRIES; i++) {
@@ -381,9 +393,12 @@ static void ensure_count_loaded(const FileBrowser *fb, int index) {
     }
 
     if (slot < 0) {
+        if (g_frame_count_loads >= FRAME_COUNT_LOAD_BUDGET) return; // réessaiera à l'image suivante
+        g_frame_count_loads++;
+
         char dir_path[FB_MAX_PATH];
         int w = snprintf(dir_path, sizeof(dir_path), "%s/%s", fb->base_path, fb->entries[index].name);
-        if (w <= 0 || (size_t)w >= sizeof(dir_path)) return;
+        if (w <= 0 || (size_t)w >= sizeof(dir_path)) { g_entry_count_ready[index] = true; return; }
 
         slot = (free_slot >= 0) ? free_slot : 0;
         g_count_cache[slot].read_count = 0;
@@ -393,6 +408,7 @@ static void ensure_count_loaded(const FileBrowser *fb, int index) {
         g_count_cache[slot].valid = true;
     }
 
+    g_entry_count_ready[index] = true;
     int r = g_count_cache[slot].read_count, t = g_count_cache[slot].total_count;
     if (t > 0) {
         snprintf(g_entry_counts[index], sizeof(g_entry_counts[index]), "%d/%d", r, t);
@@ -724,6 +740,18 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
         }
     }
 
+    // Préchargement : quand les cases visibles sont prêtes, on prépare (une par
+    // image) les rangées voisines pour que le défilement ne saccade pas.
+    if (g_frame_thumb_loads < FRAME_THUMB_LOAD_BUDGET) {
+        int ahead_first = (scroll_row + visible_rows) * GRID_COLS;
+        for (int idx = ahead_first; idx < ahead_first + 2 * GRID_COLS && idx < fb->entry_count; idx++) {
+            ensure_thumbnail_loaded(renderer, fb, idx);
+        }
+        int behind_first = (scroll_row - 1) * GRID_COLS;
+        for (int idx = behind_first; idx < behind_first + GRID_COLS; idx++) {
+            if (idx >= 0 && idx < fb->entry_count) ensure_thumbnail_loaded(renderer, fb, idx);
+        }
+    }
 }
 
 static void render_folder_detail(SDL_Renderer *renderer, const FileBrowser *fb) {
@@ -899,6 +927,29 @@ static void strip_load_slot(SDL_Renderer *renderer, ComicArchive *ar, int slot_i
     g_strip[slot_i].page_index = page_index;
     g_strip[slot_i].tex = tex;
     g_strip[slot_i].draw_h = draw_h;
+}
+
+// Changement d'orientation en mode défilement : les textures sont déjà en
+// mémoire et ne dépendent pas de la largeur d'affichage, seule la hauteur
+// affichée change. On la recalcule au lieu de tout réextraire et redécoder
+// (5 pages + réouverture de l'archive, soit plusieurs secondes sur la Switch).
+static void strip_rescale(int new_render_w) {
+    if (new_render_w == g_strip_render_w || g_strip_render_w <= 0) {
+        g_strip_render_w = new_render_w;
+        return;
+    }
+
+    float ratio = (float)new_render_w / (float)g_strip_render_w;
+    for (int i = 0; i < STRIP_WINDOW; i++) {
+        if (g_strip[i].page_index < 0 || !g_strip[i].tex) continue;
+        int tw, th;
+        SDL_QueryTexture(g_strip[i].tex, NULL, NULL, &tw, &th);
+        if (tw > 0 && th > 0) {
+            g_strip[i].draw_h = (int)((float)th * ((float)new_render_w / (float)tw));
+        }
+    }
+    g_strip_scroll *= ratio; // garde la même position relative dans la page
+    g_strip_render_w = new_render_w;
 }
 
 static void strip_reset(SDL_Renderer *renderer, ComicArchive *ar, int render_w) {
@@ -1507,6 +1558,8 @@ int main(int argc, char *argv[]) {
     while (running) {
         SDL_Event event;
         int events_this_frame = 0;
+        g_frame_thumb_loads = 0;
+        g_frame_count_loads = 0;
         while (SDL_PollEvent(&event)) {
             events_this_frame++;
             if (events_this_frame > 200) break;
@@ -1924,10 +1977,10 @@ int main(int argc, char *argv[]) {
             if (minus_btn && !prev_minus) {
                 rotated = !rotated;
                 if (read_mode == READ_MODE_STRIP) {
-                    // Les pages déjà chargées sont à l'échelle de l'ancienne
-                    // largeur : on recharge pour la nouvelle orientation, sinon
-                    // l'image reste déformée jusqu'au prochain changement de mode.
-                    strip_reset(renderer, &ar, rotated ? CANVAS_W : SCREEN_W);
+                    // Pas de rechargement : on remet simplement les pages déjà
+                    // chargées à l'échelle de la nouvelle largeur.
+                    strip_rescale(rotated ? CANVAS_W : SCREEN_W);
+                    strip_apply_scroll(renderer, &ar, 0.0f);
                 }
             }
 
