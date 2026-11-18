@@ -54,6 +54,7 @@ typedef struct {
     const char *legend_settings;
     const char *legend_back;
     const char *legend_quit;
+    const char *legend_pin;
 } UIStrings;
 
 // Détecte la langue configurée sur la console (français ou anglais par

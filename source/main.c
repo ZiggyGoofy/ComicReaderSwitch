@@ -15,6 +15,7 @@
 #include "thumbnail.h"
 #include "strings.h"
 #include "config.h"
+#include "pins.h"
 
 #define SCREEN_W 1280
 #define SCREEN_H 720
@@ -382,12 +383,27 @@ static void ensure_count_loaded(const FileBrowser *fb, int index) {
     }
 }
 
+// Place les œuvres épinglées en tête de la bibliothèque (ordre relatif conservé).
+static FBEntry g_pin_tmp[FB_MAX_ENTRIES];
+static void apply_pin_order(FileBrowser *fb) {
+    int n = 0;
+    for (int i = 0; i < fb->entry_count; i++) {
+        if (pins_is_pinned(fb->entries[i].name)) g_pin_tmp[n++] = fb->entries[i];
+    }
+    if (n == 0 || n == fb->entry_count) return;
+    for (int i = 0; i < fb->entry_count; i++) {
+        if (!pins_is_pinned(fb->entries[i].name)) g_pin_tmp[n++] = fb->entries[i];
+    }
+    memcpy(fb->entries, g_pin_tmp, sizeof(FBEntry) * (size_t)fb->entry_count);
+}
+
 static void on_directory_changed(FileBrowser *fb) {
     // À la racine, on applique la recherche en cours (le scan vient de tout
-    // remettre dans la liste).
+    // remettre dans la liste), puis les épingles passent en tête.
     if (fb_is_at_root(fb) && g_search_query[0] != '\0') {
         fb_filter(fb, g_search_query);
     }
+    if (fb_is_at_root(fb)) apply_pin_order(fb);
     reset_thumbnail_refs();
     refresh_entry_labels(fb);
 }
@@ -528,18 +544,18 @@ static void render_sidebar(SDL_Renderer *renderer) {
 
     // Légende des touches, sous le titre du menu.
     SDL_Color gray = { 150, 150, 160, 255 };
-    const char *legend[] = { UI->legend_open, UI->legend_search, UI->legend_settings,
-                             UI->legend_back, UI->legend_quit };
-    for (int i = 0; i < 5; i++) {
+    const char *legend[] = { UI->legend_open, UI->legend_search, UI->legend_pin,
+                             UI->legend_settings, UI->legend_back, UI->legend_quit };
+    for (int i = 0; i < 6; i++) {
         draw_text(renderer, legend[i], 28, 200 + i * 34, gray);
     }
 
     if (g_search_query[0] != '\0') {
         char shown[64];
         truncate_to_width(g_search_query, SIDEBAR_W - 48, shown, sizeof(shown));
-        draw_text(renderer, UI->search_label, 28, 400, gray);
-        draw_text(renderer, shown, 28, 432, accent);
-        draw_text(renderer, UI->search_clear_hint, 28, 466, gray);
+        draw_text(renderer, UI->search_label, 28, 440, gray);
+        draw_text(renderer, shown, 28, 472, accent);
+        draw_text(renderer, UI->search_clear_hint, 28, 506, gray);
     }
 }
 
@@ -600,6 +616,13 @@ static void render_library(SDL_Renderer *renderer, const FileBrowser *fb) {
                 char fallback[64];
                 truncate_to_width(e->name, GRID_TILE_W - 20, fallback, sizeof(fallback));
                 draw_text(renderer, fallback, tile_x + 10, tile_y + GRID_COVER_H / 2 - 12, gray);
+            }
+
+            if (pins_is_pinned(e->name)) {
+                // Petit ruban doré dans le coin supérieur droit de la couverture.
+                int rx = tile_x + GRID_TILE_W - 34;
+                draw_rect(renderer, rx, tile_y, 26, 38, 255, 210, 90, 255);
+                draw_rect(renderer, rx + 8, tile_y + 8, 10, 10, 90, 60, 0, 255);
             }
 
             if (index == fb->selected) {
@@ -1314,6 +1337,7 @@ int main(int argc, char *argv[]) {
         config_save_comics_dir(comics_dir);
     }
 
+    pins_load();
     g_warm_level = config_load_warm_filter();
     if (g_warm_level < 0 || g_warm_level >= WARM_LEVELS) g_warm_level = 0;
 
@@ -1683,6 +1707,17 @@ int main(int argc, char *argv[]) {
             if (minus_btn && !prev_minus) {
                 state = APP_STATE_SETTINGS;
                 settings_sel = 0;
+            }
+
+            // X : épingler / désépingler l'œuvre sélectionnée (bibliothèque).
+            if (at_root && x_btn && !prev_x_btn && fb.entry_count > 0) {
+                char pinned_name[FB_MAX_NAME];
+                snprintf(pinned_name, sizeof(pinned_name), "%s", fb.entries[fb.selected].name);
+                pins_toggle(pinned_name);
+                rescan_library(&fb);
+                for (int i = 0; i < fb.entry_count; i++) {
+                    if (strcmp(fb.entries[i].name, pinned_name) == 0) { fb.selected = i; break; }
+                }
             }
 
             // Y : rechercher une œuvre par titre (bibliothèque uniquement).

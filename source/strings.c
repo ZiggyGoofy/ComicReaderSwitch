@@ -45,6 +45,7 @@ static const UIStrings k_strings_fr = {
 
     .legend_open = "A : ouvrir",
     .legend_search = "Y : chercher",
+    .legend_pin = "X : épingler",
     .legend_settings = "- : réglages",
     .legend_back = "B : dossier parent",
     .legend_quit = "+ : quitter",
@@ -92,6 +93,7 @@ static const UIStrings k_strings_en = {
 
     .legend_open = "A: open",
     .legend_search = "Y: search",
+    .legend_pin = "X: pin",
     .legend_settings = "-: settings",
     .legend_back = "B: parent folder",
     .legend_quit = "+: quit",
